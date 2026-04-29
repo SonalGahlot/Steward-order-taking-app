@@ -10,17 +10,10 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Outlet } from '../types/types';
-import {
-  addOnLabel,
-  getCartLineUnitPreTaxTotal,
-  getMappingById,
-  getModifierMappingById,
-  getVariationById,
-  modifierLabel,
-  variationLabel,
-} from '../lib/menuVariations';
+// Decoupled from menuVariations.ts
 import { useCart } from '../context/CartContext';
 import { theme } from '../theme';
+import { getMenuTax } from '../hooks/useTax';
 
 const { colors } = theme;
 
@@ -30,13 +23,18 @@ function formatPrice(price: number | null | undefined): string {
 }
 
 function lineTotalWithTax(
+  itemId: number,
   basePrice: number,
-  gstPercent: number,
+  fallbackGst: number,
   qty: number,
 ): number {
   const base = Number(basePrice) || 0;
-  const gst = Number(gstPercent) || 0;
-  const unit = base * (1 + gst / 100);
+  const tax = getMenuTax(itemId, fallbackGst);
+  
+  if (tax.inc) {
+    return base * qty;
+  }
+  const unit = base * (1 + tax.pct / 100);
   return unit * qty;
 }
 
@@ -70,25 +68,65 @@ export default function CartModal({
     [linesForTable, outletId, selectedTable],
   );
 
-  const grandTotal = useMemo(
-    () =>
-      lines.reduce(
-        (sum, l) =>
-          sum +
-          lineTotalWithTax(
-            getCartLineUnitPreTaxTotal(
-              l.item,
-              l.variationId ?? null,
-              l.selectedAddOnMappingIds ?? [],
-              l.selectedModifierMappingIds ?? [],
-            ),
-            (l.item as any).gstpercent,
-            l.qty,
-          ),
-        0,
-      ),
-    [lines],
-  );
+  const { subtotal, gstAmount, grandTotal } = useMemo(() => {
+    let sub = 0;
+    let gst = 0;
+
+    for (const l of lines) {
+      let linePrice = Number(l.item.unitPrice) || 0;
+      if (l.variationId) {
+        const vObj = (l.item as any).variations?.find((x: any) => x.id === l.variationId);
+        if (vObj) linePrice = Number(vObj.unitPrice) || 0;
+      }
+
+      let addonTotal = 0;
+      const aids = l.selectedAddOnMappingIds ?? [];
+      if (aids.length > 0) {
+        const set = new Set(aids);
+        const addons = (l.item as any).addOns ?? [];
+        for (const a of addons) {
+          if (set.has(a.id)) {
+            addonTotal += a.isFree ? 0 : (Number(a.addOnPrice) || 0);
+          }
+        }
+      }
+
+      let modifierTotal = 0;
+      const mids = l.selectedModifierMappingIds ?? [];
+      if (mids.length > 0) {
+        const mset = new Set(mids);
+        const modifiers = (l.item as any).modifiers ?? [];
+        for (const m of modifiers) {
+          if (mset.has(m.id)) {
+            modifierTotal += m.isChargeable ? (Number(m.priceAdjustment) || 0) : 0;
+          }
+        }
+      }
+
+      const base = linePrice + addonTotal + modifierTotal;
+      const tax = getMenuTax(l.itemId, Number((l.item as any).gstpercent) || 0);
+      const qty = l.qty;
+
+      if (tax.inc) {
+        const lineTot = base * qty;
+        const linePreTax = lineTot / (1 + tax.pct / 100);
+        const lineGst = lineTot - linePreTax;
+        sub += linePreTax;
+        gst += lineGst;
+      } else {
+        const linePreTax = base * qty;
+        const lineGst = linePreTax * (tax.pct / 100);
+        sub += linePreTax;
+        gst += lineGst;
+      }
+    }
+
+    return {
+      subtotal: sub,
+      gstAmount: gst,
+      grandTotal: sub + gst,
+    };
+  }, [lines]);
 
   return (
     <Modal
@@ -103,7 +141,7 @@ export default function CartModal({
             onPress={onClose}
             style={styles.headerBackBtn}
           >
-            <Text style={styles.headerBackText}>↓</Text>
+            <Text style={styles.headerBackText}>✕</Text>
           </TouchableOpacity>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle} numberOfLines={1}>
@@ -140,23 +178,56 @@ export default function CartModal({
               {lines.map((line) => {
                 const aids = line.selectedAddOnMappingIds ?? [];
                 const mids = line.selectedModifierMappingIds ?? [];
-                const base = getCartLineUnitPreTaxTotal(
-                  line.item,
-                  line.variationId ?? null,
-                  aids,
-                  mids,
-                );
+                let linePrice = Number(line.item.unitPrice) || 0;
+                let varName = '';
+                if (line.variationId) {
+                  const vObj = (line.item as any).variations?.find((x: any) => x.id === line.variationId);
+                  if (vObj) {
+                    linePrice = Number(vObj.unitPrice) || 0;
+                    varName = vObj.variantItemName;
+                  }
+                }
+
+                let addonTotal = 0;
+                let selectedAddonNames: string[] = [];
+                if (aids.length > 0) {
+                  const set = new Set(aids);
+                  const addons = (line.item as any).addOns ?? [];
+                  for (const a of addons) {
+                    if (set.has(a.id)) {
+                      addonTotal += a.isFree ? 0 : (Number(a.addOnPrice) || 0);
+                      selectedAddonNames.push(a.addOnMenuName);
+                    }
+                  }
+                }
+
+                let modifierTotal = 0;
+                let selectedModifierNames: string[] = [];
+                if (mids.length > 0) {
+                  const mset = new Set(mids);
+                  const modifiers = (line.item as any).modifiers ?? [];
+                  for (const m of modifiers) {
+                    if (mset.has(m.id)) {
+                      modifierTotal += m.isChargeable ? (Number(m.priceAdjustment) || 0) : 0;
+                      selectedModifierNames.push(m.name);
+                    }
+                  }
+                }
+
+                const base = linePrice + addonTotal + modifierTotal;
                 const unit = lineTotalWithTax(
+                  line.itemId,
                   base,
-                  (line.item as any).gstpercent,
+                  Number((line.item as any).gstpercent) || 0,
                   1,
                 );
                 const lineSum = lineTotalWithTax(
+                  line.itemId,
                   base,
-                  (line.item as any).gstpercent,
+                  Number((line.item as any).gstpercent) || 0,
                   line.qty,
                 );
-                const v = getVariationById(line.item, line.variationId ?? null);
+                const v = line.variationId ? (line.item as any).variations?.find((x: any) => x.id === line.variationId) : null;
                 const rowKey = `${line.itemId}-${line.variationId ?? 'base'}-${aids.join(',')}-${mids.join(',')}`;
                 return (
                   <View key={rowKey} style={styles.lineCard}>
@@ -166,23 +237,32 @@ export default function CartModal({
                       </Text>
                       {v ? (
                         <Text style={styles.lineVariation} numberOfLines={2}>
-                          {variationLabel(v)}
+                          {v.variantItemName}
                         </Text>
                       ) : null}
-                      {aids.map((mid) => {
-                        const m = getMappingById(line.item, mid);
-                        if (!m) return null;
+                      {selectedAddonNames.map((name, idx) => {
                         return (
                           <Text
-                            key={mid}
+                            key={`a-${idx}`}
                             style={styles.lineAddon}
                             numberOfLines={2}
                           >
-                            + {addOnLabel(m)}
+                            + {name}
                           </Text>
                         );
                       })}
-                      {mids.map((mid) => {
+                      {selectedModifierNames.map((name, idx) => {
+                        return (
+                          <Text
+                            key={`m-${idx}`}
+                            style={styles.lineAddon}
+                            numberOfLines={2}
+                          >
+                            + {name}
+                          </Text>
+                        );
+                      })}
+                      {/* {mids.map((mid) => {
                         const m = getModifierMappingById(line.item, mid);
                         if (!m) return null;
                         return (
@@ -194,34 +274,20 @@ export default function CartModal({
                             + {modifierLabel(m)}
                           </Text>
                         );
-                      })}
+                      })} */}
                       <Text style={styles.lineMeta}>
                         {formatPrice(unit)} each
-                        {(line.item as any).gstpercent > 0
-                          ? ` (+ ${(line.item as any).gstpercent}% GST)`
-                          : ''}
+                        {(() => {
+                          const tax = getMenuTax(line.itemId, Number((line.item as any).gstpercent) || 0);
+                          if (tax.pct <= 0 && !tax.inc) return '';
+                          if (tax.inc) return ` (Inc. ${tax.name})`;
+                          return ` (+ ${tax.pct}% ${tax.name})`;
+                        })()}
                       </Text>
-                      <TouchableOpacity
-                        onPress={() =>
-                          removeLine(
-                            outletId,
-                            selectedTable,
-                            line.itemId,
-                            line.variationId ?? null,
-                            aids,
-                            mids,
-                          )
-                        }
-                        style={styles.trashBtn}
-                        accessibilityRole='button'
-                        accessibilityLabel='Remove from cart'
-                      >
-                        <Text style={styles.trashIcon}>🗑</Text>
-                      </TouchableOpacity>
+                      <Text style={styles.lineSum}>{formatPrice(lineSum)}</Text>
                     </View>
 
                     <View style={styles.lineActions}>
-                      <Text style={styles.lineSum}>{formatPrice(lineSum)}</Text>
                       <View style={styles.stepper}>
                         <Pressable
                           onPress={() =>
@@ -264,12 +330,40 @@ export default function CartModal({
                         </Pressable>
                       </View>
                     </View>
+
+                    <TouchableOpacity
+                      onPress={() =>
+                        removeLine(
+                          outletId,
+                          selectedTable,
+                          line.itemId,
+                          line.variationId ?? null,
+                          aids,
+                          mids,
+                        )
+                      }
+                      style={styles.trashBtn}
+                      accessibilityRole='button'
+                      accessibilityLabel='Remove from cart'
+                    >
+                      <Text style={styles.trashIcon}>✕</Text>
+                    </TouchableOpacity>
                   </View>
                 );
               })}
             </ScrollView>
 
             <View style={styles.footer}>
+              <View style={styles.priceBreakdown}>
+                <View style={styles.breakdownRow}>
+                  <Text style={styles.breakdownLabel}>Subtotal</Text>
+                  <Text style={styles.breakdownValue}>{formatPrice(subtotal)}</Text>
+                </View>
+                <View style={styles.breakdownRow}>
+                  <Text style={styles.breakdownLabel}>GST</Text>
+                  <Text style={styles.breakdownValue}>{formatPrice(gstAmount)}</Text>
+                </View>
+              </View>
               <TouchableOpacity
                 style={styles.orderBtn}
                 onPress={onPressOrder}
@@ -332,9 +426,8 @@ const styles = StyleSheet.create({
   },
   headerBackText: {
     color: colors.textPrimary,
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '900',
-    marginTop: -4,
   },
   headerCenter: { flex: 1, marginHorizontal: 14 },
   headerTitle: {
@@ -380,13 +473,36 @@ const styles = StyleSheet.create({
   },
 
   scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 24, gap: 16 },
+  scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 24, gap: 8 },
+
+  priceBreakdown: {
+    marginBottom: 16,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border + '50',
+    paddingBottom: 16,
+  },
+  breakdownRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  breakdownLabel: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  breakdownValue: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
 
   lineCard: {
     flexDirection: 'row',
     backgroundColor: colors.surface,
-    borderRadius: 18,
-    padding: 16,
+    borderRadius: 8,
+    padding: 8,
     borderWidth: 1,
     borderColor: colors.border,
     elevation: 2,
@@ -394,76 +510,76 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.06,
     shadowRadius: 4,
+    position: 'relative',
   },
   lineInfo: {
     flex: 1,
-    paddingRight: 10,
+    paddingRight: 8,
   },
   lineName: {
     color: colors.textPrimary,
     fontWeight: '900',
-    fontSize: 15,
-    marginBottom: 4,
+    fontSize: 13,
+    marginBottom: 2,
   },
   lineVariation: {
     color: colors.primaryDark,
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 11,
     marginBottom: 2,
   },
   lineAddon: {
     color: colors.textSecondary,
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 10,
     marginBottom: 2,
   },
   lineMeta: {
     color: colors.textSecondary,
     fontWeight: '600',
-    fontSize: 11,
-    marginBottom: 10,
+    fontSize: 10,
+    marginBottom: 4,
   },
   trashBtn: {
-    padding: 8,
-    borderRadius: 10,
-    backgroundColor: 'rgba(211, 47, 47, 0.1)',
-    alignSelf: 'flex-start',
-    marginTop: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(211, 47, 47, 0.2)',
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    padding: 4,
+    zIndex: 10,
   },
   trashIcon: {
-    color: '#d32f2f',
-    fontSize: 18,
+    color: colors.textSecondary,
+    fontSize: 12,
     fontWeight: '900',
   },
 
   lineActions: {
-    width: 90,
+    width: 70,
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
+    justifyContent: 'flex-end',
+    paddingBottom: 2,
   },
   lineSum: {
     color: colors.primaryDark,
     fontWeight: '900',
-    fontSize: 15,
+    fontSize: 13,
+    marginTop: 4,
   },
   stepper: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     backgroundColor: colors.surfaceAlt,
-    borderRadius: 10,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 2,
+    padding: 1,
     width: '100%',
   },
   stepBtn: {
-    width: 26,
-    height: 26,
-    borderRadius: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 4,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.surface,
@@ -471,15 +587,15 @@ const styles = StyleSheet.create({
   stepBtnPressed: { opacity: 0.7 },
   stepBtnText: {
     color: colors.textPrimary,
-    fontSize: 18,
+    fontSize: 12,
     fontWeight: '800',
   },
   qtyText: {
-    minWidth: 18,
+    minWidth: 16,
     textAlign: 'center',
     fontWeight: '900',
     color: colors.textPrimary,
-    fontSize: 13,
+    fontSize: 11,
   },
 
   footer: {

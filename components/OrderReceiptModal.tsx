@@ -12,7 +12,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import type { GuestOrderReceipt, OrderServiceType } from '../types/types';
+import type { GuestOrderReceipt } from '../types/types';
 import { theme } from '../theme';
 
 const { colors } = theme;
@@ -26,19 +26,6 @@ const DONE_BTN_WEB: ViewStyle =
 
 function formatPrice(n: number): string {
   return `₹${Number(n).toFixed(2)}`;
-}
-
-function serviceLabel(t: OrderServiceType): string {
-  switch (t) {
-    case 'dine_in':
-      return 'Dine-in';
-    case 'room_service':
-      return 'Room service';
-    case 'take_away':
-      return 'Take away';
-    default:
-      return t;
-  }
 }
 
 export interface OrderReceiptModalProps {
@@ -168,7 +155,7 @@ export default function OrderReceiptModal({
                   style={({ pressed }) => [
                     styles.placeBtn,
                     (placingOrder || !onConfirmPlaceOrder) &&
-                      styles.placeBtnDisabled,
+                    styles.placeBtnDisabled,
                     pressed && !placingOrder && styles.placeBtnPressed,
                     DONE_BTN_WEB,
                   ]}

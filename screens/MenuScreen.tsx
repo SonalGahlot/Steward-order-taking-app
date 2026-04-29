@@ -18,29 +18,24 @@ import {
   placeGuestOrder,
 } from '../lib/orderLogic';
 import { useMenu } from '../hooks/useMenu';
+import { useTax } from '../hooks/useTax';
+import apiClient from '../apiClient';
 import type { CartLine, GuestOrderReceipt, MenuByOutletItem, Outlet, CategoryMaster } from '../types/types';
-import {
-  addOnLabel,
-  getCartLineUnitPreTaxTotal,
-  getMappingById,
-  getMenuDisplayUnitPrice,
-  getModifierMappingById,
-  getVariationById,
-  itemNeedsOptionsModal,
-  modifierLabel,
-  variationLabel,
-} from '../lib/menuVariations';
+
+
 import { theme } from '../theme';
 import { useCart } from '../context/CartContext';
 import CartModal from '../components/CartModal';
 import OrderReceiptModal from '../components/OrderReceiptModal';
 import OrderPlacedModal from '../components/OrderPlacedModal';
-import {
-  CartItemLinesModal,
-  VariationPickerModal,
-} from '../components/MenuVariationModals';
+import AddonPickerModal from '../components/AddonPickerModal';
 
 const { colors } = theme;
+const itemHasVariations = (item: any): boolean => Array.isArray(item.variations) && item.variations.length > 0;
+const itemHasAddOns = (item: any): boolean => Array.isArray(item.addOns) && item.addOns.length > 0;
+const itemHasModifiers = (item: any): boolean => Array.isArray(item.modifiers) && item.modifiers.length > 0;
+const itemNeedsOptionsModal = (item: any): boolean => itemHasVariations(item) || itemHasAddOns(item) || itemHasModifiers(item);
+
 
 function formatPrice(price: number | null | undefined): string {
   if (price == null || Number.isNaN(Number(price))) return '—';
@@ -122,6 +117,17 @@ function VegIndicator({ isVeg }: { isVeg: boolean }) {
   );
 }
 
+function ItemTaxDisplay({ menuId, fallbackGst }: { menuId: number; fallbackGst: number }) {
+  const tax = useTax(menuId, fallbackGst);
+
+  if (tax.pct <= 0 && !tax.inc) return null;
+
+  if (tax.inc) {
+    return <Text style={styles.itemGst}>Inclusive of all taxes ({tax.name})</Text>;
+  }
+  return <Text style={styles.itemGst}>+ {tax.pct}% {tax.name}</Text>;
+}
+
 function MenuPriceColumn({
   item,
   outletLines,
@@ -130,28 +136,40 @@ function MenuPriceColumn({
   outletLines: CartLine[];
 }) {
   const itemLines = outletLines.filter((l) => l.itemId === item.id);
-  let baseUnit = getMenuDisplayUnitPrice(item);
+  let baseUnit = Number(item.unitPrice) || 0;
+  const vars = (item as any).variations ?? [];
+  const defVar = vars.find((v: any) => v.isDefault) || vars[0];
+  if (defVar) {
+    baseUnit = Number(defVar.unitPrice) || 0;
+  }
+
   let variationHint: string | null = null;
 
   if (itemLines.length === 1) {
     const line = itemLines[0];
-    baseUnit = getCartLineUnitPreTaxTotal(
-      item,
-      line.variationId,
-      line.selectedAddOnMappingIds ?? [],
-      line.selectedModifierMappingIds ?? [],
-    );
+
+    let linePrice = Number(item.unitPrice) || 0;
+    const vObj = vars.find((x: any) => x.id === line.variationId);
     const parts: string[] = [];
-    const v = getVariationById(item, line.variationId);
-    if (v) parts.push(variationLabel(v));
-    for (const mid of line.selectedAddOnMappingIds ?? []) {
-      const m = getMappingById(item, mid);
-      if (m) parts.push(addOnLabel(m));
+    if (vObj) {
+      linePrice = Number(vObj.unitPrice) || 0;
+      parts.push(vObj.variantItemName);
     }
-    for (const mid of line.selectedModifierMappingIds ?? []) {
-      const m = getModifierMappingById(item, mid);
-      if (m) parts.push(modifierLabel(m));
+
+    let addonTotal = 0;
+    const aids = line.selectedAddOnMappingIds ?? [];
+    if (aids.length > 0) {
+      const set = new Set(aids);
+      const addons = (item as any).addOns ?? [];
+      for (const a of addons) {
+        if (set.has(a.id)) {
+          addonTotal += a.isFree ? 0 : (Number(a.addOnPrice) || 0);
+          parts.push(a.addOnMenuName);
+        }
+      }
     }
+
+    baseUnit = linePrice + addonTotal;
     variationHint = parts.length > 0 ? parts.join(' · ') : null;
   } else if (itemLines.length > 1) {
     variationHint = `${itemLines.length} options in cart`;
@@ -160,9 +178,7 @@ function MenuPriceColumn({
   return (
     <View style={styles.priceCol}>
       <Text style={styles.itemPrice}>{formatPrice(baseUnit)}</Text>
-      {(item as any).gstpercent > 0 ? (
-        <Text style={styles.itemGst}>+ {(item as any).gstpercent}% GST</Text>
-      ) : null}
+      <ItemTaxDisplay menuId={item.id} fallbackGst={Number((item as any).gstpercent) || 0} />
       {variationHint ? (
         <Text style={styles.itemVarHint} numberOfLines={3}>
           {variationHint}
@@ -359,10 +375,24 @@ export default function MenuScreen({
   onBack,
 }: MenuScreenProps) {
   const outletId = outlet.id;
-  const { linesForTable, totalQtyForTable, clearOutlet, clearTable, addItem } = useCart();
-  const { menus, categories, loading, error, refetch } = useMenu(outletId);
+  const { linesForTable, totalQtyForTable, clearOutlet, clearTable, addItem, addKot } = useCart();
+  const { menus, categories, menuTypes, loading, error, refetch } = useMenu(outletId);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTab, setSelectedTab] = useState<MenuTabSelection>('all');
+  const [addonPickerItem, setAddonPickerItem] = useState<MenuByOutletItem | null>(null);
+  const [collapsedTypes, setCollapsedTypes] = useState<Set<number>>(new Set());
+
+  const toggleTypeCollapse = useCallback((typeId: number) => {
+    setCollapsedTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(typeId)) {
+        next.delete(typeId);
+      } else {
+        next.add(typeId);
+      }
+      return next;
+    });
+  }, []);
   const [cartOpen, setCartOpen] = useState(false);
   const [receipt, setReceipt] = useState<GuestOrderReceipt | null>(null);
   const [placingOrder, setPlacingOrder] = useState(false);
@@ -426,6 +456,27 @@ export default function MenuScreen({
       (m.name ?? '').toLowerCase().includes(q),
     );
   }, [searchQuery, itemsForCategory]);
+
+  const groupedItems = useMemo(() => {
+    const groups: { typeId: number; typeName: string; items: MenuByOutletItem[] }[] = [];
+    const typeMap = new Map<number, MenuByOutletItem[]>();
+
+    for (const item of displayItems) {
+      const tid = item.menuTypeId || 0;
+      if (!typeMap.has(tid)) {
+        typeMap.set(tid, []);
+      }
+      typeMap.get(tid)!.push(item);
+    }
+
+    typeMap.forEach((items, typeId) => {
+      const typeObj = menuTypes.find((t) => t.id === typeId);
+      const typeName = typeObj?.name || (typeId === 0 ? 'Standard' : `Type ${typeId}`);
+      groups.push({ typeId, typeName, items });
+    });
+
+    return groups.sort((a, b) => a.typeId - b.typeId);
+  }, [displayItems, menuTypes]);
 
   const sectionTitle = useMemo(() => {
     if (selectedTab === 'all') {
@@ -650,56 +701,89 @@ export default function MenuScreen({
                     <Text style={styles.emptyText}>{emptyListMessage}</Text>
                   </View>
                 ) : (
-                  displayItems.map((item) => (
-                    <View key={String(item.id)} style={styles.itemCard}>
-                      <View style={styles.cardInfo}>
-                        <View style={styles.itemHeader}>
-                          <VegIndicator isVeg={!item.isNonVeg} />
-                          {isSearching ? (
-                            <ItemNameWithSearchHighlight
-                              itemName={item.name ?? ''}
-                              query={searchQuery}
-                              style={styles.itemName}
-                            />
-                          ) : (
-                            <Text style={styles.itemName}>
-                              {item.name ?? ''}
+                  groupedItems.map((group) => {
+                    const isCollapsed = collapsedTypes.has(group.typeId);
+                    return (
+                      <View key={group.typeId} style={styles.typeSection}>
+                        <TouchableOpacity
+                          style={[styles.typeHeaderBtn, isCollapsed && styles.typeHeaderBtnCollapsed]}
+                          onPress={() => toggleTypeCollapse(group.typeId)}
+                          activeOpacity={0.75}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${isCollapsed ? 'Expand' : 'Collapse'} ${group.typeName}`}
+                        >
+                          <View style={styles.typeHeaderLeft}>
+                            <View style={[styles.typeHeaderDot, isCollapsed && styles.typeHeaderDotCollapsed]} />
+                            <Text style={styles.typeHeader}>{group.typeName}</Text>
+                          </View>
+                          <View style={[styles.typeIconWrapper, isCollapsed && styles.typeIconWrapperCollapsed]}>
+                            <Text style={styles.typeHeaderIcon}>
+                              {isCollapsed ? '▼' : '▲'}
                             </Text>
-                          )}
-                        </View>
+                          </View>
+                        </TouchableOpacity>
 
-                        <MenuItemMetaChips item={item} />
+                        {!isCollapsed && (
+                          <View style={styles.typeGrid}>
+                            {group.items.map((item) => (
+                              <View key={String(item.id)} style={styles.itemCard}>
+                                <View style={styles.cardInfo}>
+                                  <View style={styles.itemHeader}>
+                                    <VegIndicator isVeg={!item.isNonVeg} />
+                                    {isSearching ? (
+                                      <ItemNameWithSearchHighlight
+                                        itemName={item.name ?? ''}
+                                        query={searchQuery}
+                                        style={styles.itemName}
+                                      />
+                                    ) : (
+                                      <Text style={styles.itemName}>
+                                        {item.name ?? ''}
+                                      </Text>
+                                    )}
+                                  </View>
 
-                        {selectedTab === 'all' && (getCategoryName(item.menuCategoryId, categories) ?? '').trim() ? (
-                          <Text style={styles.itemCategory} numberOfLines={1}>
-                            {getCategoryName(item.menuCategoryId, categories)}
-                          </Text>
-                        ) : null}
+                                  <MenuItemMetaChips item={item} />
 
-                        <Text style={styles.itemDesc} numberOfLines={3}>
-                          {item.description ?? ''}
-                        </Text>
+                                  {selectedTab === 'all' && (getCategoryName(item.menuCategoryId, categories) ?? '').trim() ? (
+                                    <Text style={styles.itemCategory} numberOfLines={1}>
+                                      {getCategoryName(item.menuCategoryId, categories)}
+                                    </Text>
+                                  ) : null}
+
+                                  <Text style={styles.itemDesc} numberOfLines={3}>
+                                    {item.description ?? ''}
+                                  </Text>
+                                </View>
+
+                                <View style={styles.cardActions}>
+                                  <MenuPriceColumn
+                                    item={item}
+                                    outletLines={outletLines}
+                                  />
+                                  <MenuItemCartControls
+                                    outletId={outletId}
+                                    selectedTable={selectedTable}
+                                    item={item}
+                                    outletLines={outletLines}
+                                    showCart={isOrderTakingSystem}
+                                    onOpenVariationPicker={() => {
+                                      if (itemHasAddOns(item) || itemHasVariations(item) || itemHasModifiers(item)) {
+                                        setAddonPickerItem(item);
+                                      } else {
+                                        setAddonPickerItem(item);
+                                      }
+                                    }}
+                                    onOpenAdjustLines={() => setAdjustLinesItem(item)}
+                                  />
+                                </View>
+                              </View>
+                            ))}
+                          </View>
+                        )}
                       </View>
-
-                      <View style={styles.cardActions}>
-                        <MenuPriceColumn
-                          item={item}
-                          outletLines={outletLines}
-                        />
-                        <MenuItemCartControls
-                          outletId={outletId}
-                          selectedTable={selectedTable}
-                          item={item}
-                          outletLines={outletLines}
-                          showCart={isOrderTakingSystem}
-                          onOpenVariationPicker={() =>
-                            setVariationPickerItem(item)
-                          }
-                          onOpenAdjustLines={() => setAdjustLinesItem(item)}
-                        />
-                      </View>
-                    </View>
-                  ))
+                    );
+                  })
                 )}
               </ScrollView>
             </View>
@@ -740,6 +824,7 @@ export default function MenuScreen({
                       lines,
                       receipt.payload,
                     );
+                    addKot(outletId, selectedTable, selectedTable ? `Table ${selectedTable}` : 'Takeaway', lines);
                     clearTable(outletId, selectedTable);
                     setReceipt(null);
                     if (result.orderId != null) {
@@ -769,35 +854,24 @@ export default function MenuScreen({
             orderId={placedOrderId}
             onClose={() => setPlacedOrderId(null)}
           />
-          <VariationPickerModal
-            visible={variationPickerItem != null}
-            item={variationPickerItem}
-            onClose={() => setVariationPickerItem(null)}
-            onConfirm={(
-              variationId,
-              selectedAddOnMappingIds,
-              selectedModifierMappingIds,
-            ) => {
-              if (variationPickerItem) {
+
+          <AddonPickerModal
+            visible={addonPickerItem != null}
+            item={addonPickerItem}
+            onClose={() => setAddonPickerItem(null)}
+            onConfirm={(variationId, selectedAddOnMappingIds, selectedModifierMappingIds) => {
+              if (addonPickerItem) {
                 addItem(
                   outletId,
                   selectedTable,
-                  variationPickerItem,
+                  addonPickerItem,
                   variationId,
                   selectedAddOnMappingIds,
                   selectedModifierMappingIds,
                 );
               }
-              setVariationPickerItem(null);
+              setAddonPickerItem(null);
             }}
-          />
-          <CartItemLinesModal
-            visible={adjustLinesItem != null}
-            item={adjustLinesItem}
-            lines={outletLines}
-            outletId={outletId}
-            selectedTable={selectedTable}
-            onClose={() => setAdjustLinesItem(null)}
           />
         </>
       ) : null}
@@ -975,6 +1049,71 @@ const styles = StyleSheet.create({
   listScrollContent: {
     paddingHorizontal: 16,
     paddingBottom: 40,
+    gap: 16,
+  },
+
+  typeSection: {
+    marginBottom: 24,
+  },
+  typeHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  typeHeaderBtnCollapsed: {
+    backgroundColor: colors.border + '30',
+    borderColor: colors.border,
+  },
+  typeHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  typeHeaderDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.primary,
+  },
+  typeHeaderDotCollapsed: {
+    backgroundColor: colors.textSecondary,
+  },
+  typeHeader: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    letterSpacing: 0.2,
+    textTransform: 'uppercase',
+  },
+  typeIconWrapper: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.border + '60',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  typeIconWrapperCollapsed: {
+    backgroundColor: colors.primary + '20',
+  },
+  typeHeaderIcon: {
+    fontSize: 10,
+    color: colors.textPrimary,
+    fontWeight: '900',
+  },
+  typeGrid: {
     gap: 16,
   },
 

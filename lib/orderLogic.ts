@@ -1,8 +1,5 @@
 
-import {
-  formatReceiptLineName,
-  getCartLineUnitPreTaxTotal,
-} from './menuVariations';
+import { getMenuTax } from '../hooks/useTax';
 import type {
   CartLine,
   GuestOrderReceipt,
@@ -16,18 +13,80 @@ function lineTotalsForCartLine(line: CartLine): {
   gstLine: number;
   lineTotal: number;
 } {
-  const base = getCartLineUnitPreTaxTotal(
-    line.item,
-    line.variationId ?? null,
-    line.selectedAddOnMappingIds ?? [],
-    line.selectedModifierMappingIds ?? [],
-  );
-  const gstPct = Number((line.item as any).gstpercent) || 0;
+  let linePrice = Number(line.item.unitPrice) || 0;
+  if (line.variationId) {
+    const vObj = (line.item as any).variations?.find((x: any) => x.id === line.variationId);
+    if (vObj) linePrice = Number(vObj.unitPrice) || 0;
+  }
+  
+  let addonTotal = 0;
+  const aids = line.selectedAddOnMappingIds ?? [];
+  if (aids.length > 0) {
+    const set = new Set(aids);
+    const addons = (line.item as any).addOns ?? [];
+    for (const a of addons) {
+      if (set.has(a.id)) {
+        addonTotal += a.isFree ? 0 : (Number(a.addOnPrice) || 0);
+      }
+    }
+  }
+  
+  let modifierTotal = 0;
+  const mids = line.selectedModifierMappingIds ?? [];
+  if (mids.length > 0) {
+    const mset = new Set(mids);
+    const modifiers = (line.item as any).modifiers ?? [];
+    for (const m of modifiers) {
+      if (mset.has(m.id)) {
+        modifierTotal += m.isChargeable ? (Number(m.priceAdjustment) || 0) : 0;
+      }
+    }
+  }
+
+  const base = linePrice + addonTotal + modifierTotal;
+  const tax = getMenuTax(line.itemId, Number((line.item as any).gstpercent) || 0);
   const qty = line.qty;
-  const preTax = base * qty;
-  const gstLine = preTax * (gstPct / 100);
-  const lineTotal = preTax + gstLine;
-  return { baseUnit: base, preTaxLine: preTax, gstLine, lineTotal };
+
+  if (tax.inc) {
+    const lineTotal = base * qty;
+    const preTax = lineTotal / (1 + tax.pct / 100);
+    const gstLine = lineTotal - preTax;
+    return { baseUnit: base, preTaxLine: preTax, gstLine, lineTotal };
+  } else {
+    const preTax = base * qty;
+    const gstLine = preTax * (tax.pct / 100);
+    const lineTotal = preTax + gstLine;
+    return { baseUnit: base, preTaxLine: preTax, gstLine, lineTotal };
+  }
+}
+
+function formatReceiptLineName(line: CartLine): string {
+  const parts: string[] = [line.item.name ?? ''];
+  if (line.variationId) {
+    const vObj = (line.item as any).variations?.find((x: any) => x.id === line.variationId);
+    if (vObj) parts.push(`(${vObj.variantItemName})`);
+  }
+  const aids = line.selectedAddOnMappingIds ?? [];
+  if (aids.length > 0) {
+    const set = new Set(aids);
+    const addons = (line.item as any).addOns ?? [];
+    for (const a of addons) {
+      if (set.has(a.id)) {
+        parts.push(`+ ${a.addOnMenuName}`);
+      }
+    }
+  }
+  const mids = line.selectedModifierMappingIds ?? [];
+  if (mids.length > 0) {
+    const mset = new Set(mids);
+    const modifiers = (line.item as any).modifiers ?? [];
+    for (const m of modifiers) {
+      if (mset.has(m.id)) {
+        parts.push(`+ ${m.name}`);
+      }
+    }
+  }
+  return parts.join(' ');
 }
 
 function guestReceiptTotalsFromLines(lines: CartLine[]): {
@@ -46,12 +105,7 @@ function guestReceiptTotalsFromLines(lines: CartLine[]): {
     totalGst += gstLine;
     finalAmount += lineTotal;
     receiptLines.push({
-      itemName: formatReceiptLineName(
-        line.item,
-        line.variationId ?? null,
-        line.selectedAddOnMappingIds ?? [],
-        line.selectedModifierMappingIds ?? [],
-      ),
+      itemName: formatReceiptLineName(line),
       qty: line.qty,
       lineTotal,
     });

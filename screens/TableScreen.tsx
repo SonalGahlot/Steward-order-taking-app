@@ -16,6 +16,7 @@ import type { Outlet, TableMaster } from '../types/types';
 import { theme } from '../theme';
 import { useCart } from '../context/CartContext';
 import { useTables } from '../hooks/useTables';
+import { useAuth } from '../hooks/useAuth';
 
 const { colors } = theme;
 
@@ -28,9 +29,10 @@ export default function TableScreen({
   outlet,
   onSelectTable,
 }: TableScreenProps) {
-  const { lines } = useCart();
+  const { lines, kots, updateKotStatus } = useCart();
   const { width } = useWindowDimensions();
   const { tables: apiTables, loading, error } = useTables(outlet.id);
+  const { signOut } = useAuth();
   const [activeTab, setActiveTab] = useState<'tables' | 'kots'>('tables');
 
   // Intercept back action
@@ -90,32 +92,8 @@ export default function TableScreen({
   }, [apiTables, occupiedTables]);
 
   const kotTickets = useMemo(() => {
-    const map = new Map<string, typeof lines>();
-    for (const line of lines) {
-      if (line.outletId === outlet.id && line.qty > 0) {
-        const tableKey = line.tableNo || 'Unknown';
-        if (!map.has(tableKey)) {
-          map.set(tableKey, []);
-        }
-        map.get(tableKey)!.push(line);
-      }
-    }
-
-    const list: { tableNo: string; tableName: string; lines: typeof lines }[] = [];
-    map.forEach((tableLines, tableKey) => {
-      const tableObj = apiTables.find((t) => String(t.id) === tableKey);
-      const tableName =
-        tableObj?.tableCaption ||
-        (tableObj ? `Table ${tableObj.tableCode || tableObj.id}` : `Table ${tableKey}`);
-      list.push({
-        tableNo: tableKey,
-        tableName,
-        lines: tableLines,
-      });
-    });
-
-    return list;
-  }, [lines, apiTables, outlet.id]);
+    return kots.filter((k) => k.outletId === outlet.id && k.status !== 'Served');
+  }, [kots, outlet.id]);
 
   // Calculate column layout
   const numColumns = width > 600 ? 4 : 3;
@@ -172,6 +150,15 @@ export default function TableScreen({
             Pick your dining spot to begin ordering
           </Text>
         </View>
+        <TouchableOpacity
+          style={styles.logoutBtn}
+          onPress={signOut}
+          activeOpacity={0.75}
+          accessibilityRole="button"
+          accessibilityLabel="Logout button"
+        >
+          <Text style={styles.logoutBtnText}>Logout</Text>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.tabHeader}>
@@ -222,7 +209,7 @@ export default function TableScreen({
       ) : (
         <ScrollView
           style={{ flex: 1 }}
-          contentContainerStyle={styles.listContent}
+          contentContainerStyle={styles.kotGrid}
           showsVerticalScrollIndicator={false}
         >
           {kotTickets.length === 0 ? (
@@ -231,32 +218,77 @@ export default function TableScreen({
             </View>
           ) : (
             kotTickets.map((kot) => (
-              <TouchableOpacity
-                key={kot.tableNo}
+              <View
+                key={kot.id}
                 style={styles.kotCard}
-                onPress={() => onSelectTable(kot.tableNo)}
-                activeOpacity={0.9}
               >
                 <View style={styles.kotHeader}>
                   <Text style={styles.kotTable}>{kot.tableName}</Text>
-                  <Text style={styles.kotDraftBadge}>In Progress</Text>
+                  <Text style={[
+                    styles.kotDraftBadge, 
+                    kot.status === 'Preparing' && styles.kotBadgePreparing,
+                    kot.status === 'Served' && styles.kotBadgeServed
+                  ]}>
+                    {kot.status}
+                  </Text>
                 </View>
                 <View style={styles.kotDivider} />
-                {/* {kot.lines.map((line, index) => (
-                  <View key={index} style={styles.kotLine}>
-                    <Text style={styles.kotQty}>{line.qty} x</Text>
-                    <Text style={styles.kotItem} numberOfLines={2}>
-                      {line.item.itemName}
-                      {line.variationId
-                        ? ` (${line.item.variations?.find((v) => v.id === line.variationId)?.variationName})`
-                        : ''}
-                    </Text>
-                  </View>
-                ))} */}
-                <View style={styles.kotFooter}>
-                  <Text style={styles.kotActionText}>Tap to edit order →</Text>
+                {kot.lines.map((line: any, index: number) => {
+                  let name = line.item.name || 'Item';
+                  if (line.variationId) {
+                    const vObj = (line.item as any).variations?.find((v: any) => v.id === line.variationId);
+                    if (vObj) name += ` (${vObj.variantItemName})`;
+                  }
+                  const aids = line.selectedAddOnMappingIds ?? [];
+                  if (aids.length > 0) {
+                    const addons = (line.item as any).addOns ?? [];
+                    const set = new Set(aids);
+                    for (const a of addons) {
+                      if (set.has(a.id)) name += ` + ${a.addOnMenuName}`;
+                    }
+                  }
+                  const mids = line.selectedModifierMappingIds ?? [];
+                  if (mids.length > 0) {
+                    const modifiers = (line.item as any).modifiers ?? [];
+                    const mset = new Set(mids);
+                    for (const m of modifiers) {
+                      if (mset.has(m.id)) name += ` + ${m.name}`;
+                    }
+                  }
+                  
+                  return (
+                    <View key={index} style={styles.kotLine}>
+                      <Text style={styles.kotQty}>{line.qty} x</Text>
+                      <Text style={styles.kotItem} numberOfLines={2}>
+                        {name}
+                      </Text>
+                    </View>
+                  );
+                })}
+                <View style={styles.kotDivider} />
+                <View style={styles.statusActionRow}>
+                  {(['Pending', 'Preparing', 'Served'] as const).map((st) => (
+                    <TouchableOpacity
+                      key={st}
+                      style={[
+                        styles.statusOptionBtn,
+                        kot.status === st && styles.statusOptionBtnActive,
+                      ]}
+                      onPress={() => updateKotStatus(kot.id, st)}
+                      activeOpacity={0.8}
+                    >
+                      <Text
+                        style={[
+                          styles.statusOptionText,
+                          kot.status === st && styles.statusOptionTextActive,
+                        ]}
+                      >
+                        {st}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
-              </TouchableOpacity>
+              </View>
             ))
           )}
         </ScrollView>
@@ -271,11 +303,25 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 24,
     paddingVertical: 28,
     borderBottomWidth: 1,
     borderBottomColor: colors.border + '30',
     backgroundColor: colors.headerFooter,
+  },
+  logoutBtn: {
+    backgroundColor: colors.border + '40',
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+  },
+  logoutBtnText: {
+    color: '#e74c3c',
+    fontSize: 13,
+    fontWeight: '800',
   },
   tabHeader: {
     flexDirection: 'row',
@@ -307,14 +353,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  kotGrid: {
+    padding: 20,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+    justifyContent: 'flex-start',
+  },
   kotCard: {
     backgroundColor: colors.surface,
     borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
+    padding: 14,
     borderWidth: 1,
     borderColor: colors.border,
     elevation: 3,
+    minWidth: 280,
+    maxWidth: 360,
+    flexGrow: 1,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
@@ -334,12 +389,47 @@ const styles = StyleSheet.create({
   kotDraftBadge: {
     backgroundColor: 'rgba(243, 156, 18, 0.15)',
     color: '#e67e22',
+    fontSize: 11,
+    fontWeight: '800',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    overflow: 'hidden',
+    textTransform: 'uppercase',
+  },
+  kotBadgePreparing: {
+    backgroundColor: 'rgba(52, 152, 219, 0.15)',
+    color: '#2980b9',
+  },
+  kotBadgeServed: {
+    backgroundColor: 'rgba(46, 204, 113, 0.15)',
+    color: '#27ae60',
+  },
+  statusActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between',
+  },
+  statusOptionBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+  },
+  statusOptionBtnActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primaryDark,
+  },
+  statusOptionText: {
     fontSize: 12,
     fontWeight: '800',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    textTransform: 'uppercase',
+    color: colors.textSecondary,
+  },
+  statusOptionTextActive: {
+    color: '#ffffff',
   },
   kotDivider: {
     height: 1,
@@ -374,7 +464,8 @@ const styles = StyleSheet.create({
     color: colors.primary,
   },
   headerTextBlock: {
-    flex: 0,
+    flex: 1,
+    marginRight: 16,
   },
   outletName: {
     fontSize: 13,

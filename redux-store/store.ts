@@ -1,5 +1,6 @@
 import { configureStore } from '@reduxjs/toolkit';
 import userReducer from './slices/userSlice';
+import navReducer from './slices/navSlice';
 // import invoiceReducer from './slices/invoiceSlice';
 import { TypedUseSelectorHook, useDispatch, useSelector } from 'react-redux';
 import { persistStore, persistReducer } from 'redux-persist';
@@ -10,16 +11,15 @@ import storage from './storage';
 const userPersistConfig = {
   key: 'user',
   storage,
-  whitelist: ['user', 'token', 'isAuthenticated'],
 };
 
-// const invoicePersistConfig = {
-//   key: 'invoice',
-//   storage,
-//   whitelist: ['invoices', 'currentInvoice'],
-// };
+const navPersistConfig = {
+  key: 'nav',
+  storage,
+};
 
 const persistedUserReducer = persistReducer(userPersistConfig, userReducer);
+const persistedNavReducer = persistReducer(navPersistConfig, navReducer);
 // const persistedInvoiceReducer = persistReducer(
 //   invoicePersistConfig,
 //   invoiceReducer
@@ -30,6 +30,7 @@ const persistedUserReducer = persistReducer(userPersistConfig, userReducer);
 export const store = configureStore({
   reducer: {
     user: persistedUserReducer,
+    nav: persistedNavReducer,
     // invoice: persistedInvoiceReducer,
   },
   // inside configureStore({...})

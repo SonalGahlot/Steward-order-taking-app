@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { Provider } from 'react-redux';
 import { PersistGate } from 'redux-persist/integration/react';
-import { store, persistor, useAppSelector } from './redux-store/store';
+import { store, persistor, useAppSelector, useAppDispatch } from './redux-store/store';
 import apiClient from './apiClient';
 import LandingScreen from './screens/LandingScreen';
 import MenuScreen from './screens/MenuScreen';
@@ -23,6 +23,11 @@ import {
 } from './lib/guestUrl';
 import { theme } from './theme';
 import LoginScreen from './screens/LoginScreen';
+import {
+  setScreenState,
+  setSelectedOutletState,
+  setSelectedTableState,
+} from './redux-store/slices/navSlice';
 
 type Screen = 'landing' | 'tables' | 'menu';
 
@@ -33,12 +38,23 @@ function getAdminAppBaseUrl(): string {
 }
 
 function AppContent() {
-  const [screen, setScreen] = useState<Screen>('landing');
-  const [selectedOutlet, setSelectedOutlet] = useState<Outlet | null>(null);
-  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const dispatch = useAppDispatch();
+  const { screen, selectedOutlet, selectedTable } = useAppSelector((state) => state.nav);
   const [routeReady, setRouteReady] = useState(Platform.OS !== 'web');
 
   const isAuthenticated = useAppSelector((state) => state.user.isAuthenticated);
+
+  const setScreen = useCallback((s: any) => dispatch(setScreenState(s)), [dispatch]);
+  const setSelectedOutlet = useCallback((o: any) => dispatch(setSelectedOutletState(o)), [dispatch]);
+  const setSelectedTable = useCallback((t: any) => dispatch(setSelectedTableState(t)), [dispatch]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setSelectedOutlet(null);
+      setSelectedTable(null);
+      setScreen('landing');
+    }
+  }, [isAuthenticated]);
 
   const applyUrlToState = useCallback(async () => {
     const p = readGuestUrlParams();
@@ -50,12 +66,12 @@ function AppContent() {
       }
       const response = await apiClient.get<any>('/api/OutletMaster');
       console.log('App.tsx applyUrlToState Outlets from API:', response.data);
-      
+
       const raw = response.data;
-      const outlets: Outlet[] = Array.isArray(raw) 
-        ? raw 
+      const outlets: Outlet[] = Array.isArray(raw)
+        ? raw
         : (raw && typeof raw === 'object' && Array.isArray(raw.data) ? raw.data : []);
-        
+
       const outlet = outlets.find((o) => o.id === p.outletId && o.isActive);
       if (!outlet) {
         setSelectedOutlet(null);
@@ -141,14 +157,7 @@ function AppContent() {
         const base = getAdminAppBaseUrl();
         const qs = new URLSearchParams({
           username: result.username,
-        });
-        if (result.adminOutletIds !== undefined) {
-          const ids = result.adminOutletIds;
-          qs.set(
-            'outletIds',
-            ids == null || ids.length === 0 ? '' : ids.join(','),
-          );
-        }
+        })
         const url = `${base}/landing?${qs.toString()}`;
         Linking.openURL(url).catch(() => {
           Alert.alert(

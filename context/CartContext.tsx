@@ -9,11 +9,17 @@ import React, {
 } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { CartLine, MenuByOutletItem } from '../types/types';
-import {
-  addOnSelectionEqual,
-  itemHasVariations,
-  sortMappingIds,
-} from '../lib/menuVariations';
+const sortMappingIds = (ids: number[]): number[] => [...ids].sort((a, b) => a - b);
+
+const addOnSelectionEqual = (a: number[], b: number[]): boolean => {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort((x, y) => x - y);
+  const sb = [...b].sort((x, y) => x - y);
+  return sa.every((val, i) => val === sb[i]);
+};
+
+const itemHasVariations = (item: MenuByOutletItem): boolean => 
+  Array.isArray((item as any).variations) && (item as any).variations.length > 0;
 
 const CART_STORAGE_KEY = '@qr_app_cart_lines_v4';
 
@@ -60,9 +66,9 @@ function validAddOnIdsForItem(
   item: MenuByOutletItem,
   ids: number[],
 ): number[] {
-  const list = (item as any).addOnMappings;
+  const list = (item as any).addOns;
   if (!list?.length) return [];
-  const allowed = new Set(list.map((m: any) => m.mappingId));
+  const allowed = new Set(list.map((m: any) => m.id));
   return sortMappingIds(ids.filter((id) => allowed.has(id)));
 }
 
@@ -70,14 +76,22 @@ function validModifierIdsForItem(
   item: MenuByOutletItem,
   ids: number[],
 ): number[] {
-  const list = (item as any).modifierMappings;
-  if (!list?.length) return [];
-  const allowed = new Set(list.map((m: any) => m.mappingId));
-  return sortMappingIds(ids.filter((id) => allowed.has(id)));
+  return sortMappingIds(ids);
+}
+
+export interface KotItem {
+  id: string;
+  outletId: number;
+  tableNo: string | null;
+  tableName: string;
+  lines: CartLine[];
+  status: 'Pending' | 'Preparing' | 'Served';
+  placedTime: string;
 }
 
 type CartContextValue = {
   lines: CartLine[];
+  kots: KotItem[];
   linesForOutlet: (outletId: number) => CartLine[];
   linesForTable: (outletId: number, tableNo: string | null) => CartLine[];
   totalQtyForOutlet: (outletId: number) => number;
@@ -116,6 +130,8 @@ type CartContextValue = {
   ) => void;
   clearOutlet: (outletId: number) => void;
   clearTable: (outletId: number, tableNo: string | null) => void;
+  addKot: (outletId: number, tableNo: string | null, tableName: string, lines: CartLine[]) => void;
+  updateKotStatus: (kotId: string, status: 'Pending' | 'Preparing' | 'Served') => void;
 };
 
 const CartContext = createContext<CartContextValue | null>(null);
@@ -144,6 +160,7 @@ function lineMatches(
 
 export function CartProvider({ children }: { children: ReactNode }) {
   const [lines, setLines] = useState<CartLine[]>([]);
+  const [kots, setKots] = useState<KotItem[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -375,9 +392,54 @@ export function CartProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  const addKot = useCallback((outletId: number, tableNo: string | null, tableName: string, newLines: CartLine[]) => {
+    setKots((prev) => [
+      ...prev,
+      {
+        id: Math.floor(Math.random() * 10000).toString(),
+        outletId,
+        tableNo,
+        tableName,
+        lines: [...newLines],
+        status: 'Pending',
+        placedTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+    ]);
+  }, []);
+
+  const updateKotStatus = useCallback((kotId: string, status: 'Pending' | 'Preparing' | 'Served') => {
+    setKots((prev) =>
+      prev.map((k) => (k.id === kotId ? { ...k, status } : k))
+    );
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const rawKots = await AsyncStorage.getItem('@qr_app_kots');
+        if (rawKots != null) {
+          const parsed = JSON.parse(rawKots);
+          if (!cancelled && Array.isArray(parsed)) {
+            setKots(parsed);
+          }
+        }
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    void AsyncStorage.setItem('@qr_app_kots', JSON.stringify(kots)).catch(() => {});
+  }, [kots, hydrated]);
+
   const value = useMemo<CartContextValue>(
     () => ({
       lines,
+      kots,
       linesForOutlet,
       linesForTable,
       totalQtyForOutlet,
@@ -388,9 +450,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
       removeLine,
       clearOutlet,
       clearTable,
+      addKot,
+      updateKotStatus,
     }),
     [
       lines,
+      kots,
       linesForOutlet,
       linesForTable,
       totalQtyForOutlet,
@@ -401,6 +466,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
       removeLine,
       clearOutlet,
       clearTable,
+      addKot,
+      updateKotStatus,
     ],
   );
 

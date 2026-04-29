@@ -91,7 +91,6 @@ export default function LandingScreen({
       // Static mock login success
       const result: AdminUserLoginResponse = {
         username: trimmed,
-        adminOutletIds: outlets.map((o) => o.id),
       };
       onLoginSuccess?.(result);
       closeLogin();
