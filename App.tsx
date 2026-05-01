@@ -14,7 +14,8 @@ import apiClient from './apiClient';
 import LandingScreen from './screens/LandingScreen';
 import MenuScreen from './screens/MenuScreen';
 import TableScreen from './screens/TableScreen';
-import { CartProvider } from './context/CartContext';
+import { CartProvider, useCart } from './context/CartContext';
+import { setSelectedFoodSessionState } from './redux-store/slices/navSlice';
 import type { AdminUserLoginResponse, Outlet } from './types/types';
 import {
   clearGuestUrlParams,
@@ -28,8 +29,9 @@ import {
   setSelectedOutletState,
   setSelectedTableState,
 } from './redux-store/slices/navSlice';
+import CartScreen from './screens/CartScreen';
 
-type Screen = 'landing' | 'tables' | 'menu';
+type Screen = 'landing' | 'tables' | 'menu' | 'cart';
 
 function getAdminAppBaseUrl(): string {
   const fromEnv = process.env.EXPO_PUBLIC_ADMIN_APP_URL;
@@ -38,6 +40,7 @@ function getAdminAppBaseUrl(): string {
 }
 
 function AppContent() {
+  const { setInvoiceData, clearCart, setTableContext } = useCart();
   const dispatch = useAppDispatch();
   const { screen, selectedOutlet, selectedTable } = useAppSelector((state) => state.nav);
   const [routeReady, setRouteReady] = useState(Platform.OS !== 'web');
@@ -80,6 +83,7 @@ function AppContent() {
         return;
       }
       setSelectedOutlet(outlet);
+      setTableContext(outlet.id, null as any, null);
       setScreen('tables');
     } catch {
       setSelectedOutlet(null);
@@ -120,7 +124,8 @@ function AppContent() {
   }, []);
 
   const handleSelectOutlet = useCallback(
-    (outlet: Outlet) => {
+    (outlet: Outlet, foodSessionId: number) => {
+      dispatch(setSelectedFoodSessionState(foodSessionId));
       setSelectedOutlet(outlet);
       setScreen('tables');
       if (Platform.OS === 'web') {
@@ -132,15 +137,41 @@ function AppContent() {
         );
       }
     },
-    [],
+    [dispatch],
   );
 
   const handleSelectTable = useCallback(
-    (table: string) => {
-      setSelectedTable(table);
+    async (tableId: string, tableCode: string) => {
+      setSelectedTable(tableCode);
+      clearCart();
+
+      if (selectedOutlet) {
+        setTableContext(selectedOutlet.id, tableId, (store.getState().nav as any).selectedFoodSessionId);
+      }
+
+      try {
+        if (selectedOutlet) {
+          // 1. Fetch active invoice for the table using tableId instead of tableCode
+          const invRes = await apiClient.get(`/api/FNBInvoiceMaster/table/${selectedOutlet.id}/${tableId}`);
+          if (invRes.data) {
+            const invoice = invRes.data;
+            // 2. Fetch transactions for the invoice
+            const transRes = await apiClient.get(`/api/FNBInvoiceTran/master/${invoice.id}`);
+            // 3. Fetch add-ons for the invoice
+            const addonsRes = await apiClient.get(`/api/FNBInvoiceTranAddOn/master/${invoice.id}`);
+
+            if (transRes.data) {
+              setInvoiceData(invoice.id, transRes.data, addonsRes.data || []);
+            }
+          }
+        }
+      } catch (err) {
+        console.log('No active invoice or error fetching invoice:', err);
+      }
+
       setScreen('menu');
     },
-    [],
+    [selectedOutlet, setInvoiceData, clearCart],
   );
 
   const handleBackToLanding = useCallback(() => {
@@ -207,6 +238,12 @@ function AppContent() {
               selectedTable={selectedTable}
               isOrderTakingSystem={true}
               onBack={() => setScreen('tables')}
+              onViewCart={() => setScreen('cart')}
+            />
+          )}
+          {screen === 'cart' && selectedOutlet != null && (
+            <CartScreen
+              onBack={() => setScreen('menu')}
             />
           )}
         </>

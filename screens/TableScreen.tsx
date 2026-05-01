@@ -10,30 +10,34 @@ import {
   useWindowDimensions,
   Platform,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Outlet, TableMaster } from '../types/types';
 import { theme } from '../theme';
-import { useCart } from '../context/CartContext';
 import { useTables } from '../hooks/useTables';
 import { useAuth } from '../hooks/useAuth';
+import { useKots, KOTMasterDto } from '../hooks/useKots';
+import { useOccupancy } from '../hooks/useOccupancy';
 
 const { colors } = theme;
+import apiClient from '../apiClient';
 
 export interface TableScreenProps {
   outlet: Outlet;
-  onSelectTable: (tableNo: string) => void;
+  onSelectTable: (tableId: string, tableCode: string) => void;
 }
 
 export default function TableScreen({
   outlet,
   onSelectTable,
 }: TableScreenProps) {
-  const { lines, kots, updateKotStatus } = useCart();
   const { width } = useWindowDimensions();
   const { tables: apiTables, loading, error } = useTables(outlet.id);
-  const { signOut } = useAuth();
+  const signOut = useAuth().signOut;
   const [activeTab, setActiveTab] = useState<'tables' | 'kots'>('tables');
+  const { occupiedTableCodes, refreshOccupancy } = useOccupancy(outlet.id);
+  const { kots, loading: kotsLoading, error: kotsError, refreshKots } = useKots(outlet.id, activeTab === 'kots');
 
   // Intercept back action
   useEffect(() => {
@@ -50,16 +54,6 @@ export default function TableScreen({
     return () => backHandler.remove();
   }, []);
 
-  // Derive occupied tables from current cart state
-  const occupiedTables = useMemo(() => {
-    const occupied = new Set<string>();
-    for (const line of lines) {
-      if (line.outletId === outlet.id && line.tableNo && line.qty > 0) {
-        occupied.add(line.tableNo);
-      }
-    }
-    return occupied;
-  }, [lines, outlet.id]);
 
   const sections = useMemo(() => {
     const map = new Map<string, typeof apiTables>();
@@ -73,27 +67,26 @@ export default function TableScreen({
 
     const list: {
       sectionName: string;
-      tables: { id: string; label: string; displayCode: string; isOccupied: boolean }[];
+      tables: { id: string; label: string; displayCode: string; }[];
     }[] = [];
 
     map.forEach((items, secName) => {
       list.push({
         sectionName: secName,
-        tables: items.map((t) => ({
-          id: String(t.id),
-          label: t.tableCaption || `Table ${t.tableCode || t.id}`,
-          displayCode: t.tableCode || String(t.id),
-          isOccupied: occupiedTables.has(String(t.id)),
-        })),
+        tables: items.map((t) => {
+          const code = t.tableCode || String(t.id);
+          return {
+            id: String(t.id),
+            label: t.tableCaption || `Table ${t.tableCode || t.id}`,
+            displayCode: code,
+            isOccupied: occupiedTableCodes.has(code),
+          };
+        }),
       });
     });
 
     return list;
-  }, [apiTables, occupiedTables]);
-
-  const kotTickets = useMemo(() => {
-    return kots.filter((k) => k.outletId === outlet.id && k.status !== 'Served');
-  }, [kots, outlet.id]);
+  }, [apiTables]);
 
   // Calculate column layout
   const numColumns = width > 600 ? 4 : 3;
@@ -102,10 +95,31 @@ export default function TableScreen({
   const itemWidth =
     (width - containerPadding * 2 - itemMargin * (numColumns - 1)) / numColumns;
 
+  const handleMarkPrepared = async (kotId: number) => {
+    try {
+      await apiClient.post(`/api/KOTMaster/${kotId}/mark-prepared`);
+      refreshKots();
+    } catch (err) {
+      console.error('Failed to mark KOT as prepared', err);
+      Alert.alert('Error', 'Failed to update KOT status');
+    }
+  };
+
+  const handleMarkDelivered = async (kotId: number) => {
+    try {
+      await apiClient.post(`/api/KOTMaster/${kotId}/mark-delivered`);
+      refreshKots();
+      Alert.alert('Success', 'KOT marked as served!');
+    } catch (err) {
+      console.error('Failed to mark KOT as served', err);
+      Alert.alert('Error', 'Failed to update KOT status');
+    }
+  };
+
   const renderTableItem = ({
     item,
   }: {
-    item: { id: string; label: string; displayCode: string; isOccupied: boolean };
+    item: { id: string; label: string; displayCode: string; isOccupied: boolean; };
   }) => {
     return (
       <TouchableOpacity
@@ -113,12 +127,11 @@ export default function TableScreen({
         activeOpacity={0.85}
         style={[
           styles.tableCard,
-          { width: itemWidth },
           item.isOccupied && styles.tableCardOccupied,
+          { width: itemWidth },
         ]}
-        onPress={() => onSelectTable(item.id)}
+        onPress={() => onSelectTable(item.id, item.displayCode)}
         accessibilityRole="button"
-        accessibilityLabel={`${item.label} ${item.isOccupied ? '(Occupied)' : '(Available)'}`}
       >
         <View style={styles.cardInner}>
           <Text style={styles.tableNumber} numberOfLines={1} adjustsFontSizeToFit>
@@ -174,7 +187,7 @@ export default function TableScreen({
           onPress={() => setActiveTab('kots')}
           activeOpacity={0.8}
         >
-          <Text style={[styles.tabText, activeTab === 'kots' && styles.tabTextActive]}>Active KOT ({kotTickets.length})</Text>
+          <Text style={[styles.tabText, activeTab === 'kots' && styles.tabTextActive]}>Active KOT </Text>
         </TouchableOpacity>
       </View>
 
@@ -209,87 +222,85 @@ export default function TableScreen({
       ) : (
         <ScrollView
           style={{ flex: 1 }}
-          contentContainerStyle={styles.kotGrid}
+          contentContainerStyle={styles.kotList}
           showsVerticalScrollIndicator={false}
         >
-          {kotTickets.length === 0 ? (
-            <View style={styles.centerKot}>
-              <Text style={styles.emptyText}>No active KOTs at the moment.</Text>
+          {kotsLoading && kots.length === 0 ? (
+            <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 40 }} />
+          ) : kots.length === 0 ? (
+            <View style={styles.centerWrap}>
+              <Text style={styles.emptyText}>No active KOTs found.</Text>
             </View>
           ) : (
-            kotTickets.map((kot) => (
-              <View
-                key={kot.id}
-                style={styles.kotCard}
-              >
-                <View style={styles.kotHeader}>
-                  <Text style={styles.kotTable}>{kot.tableName}</Text>
-                  <Text style={[
-                    styles.kotDraftBadge, 
-                    kot.status === 'Preparing' && styles.kotBadgePreparing,
-                    kot.status === 'Served' && styles.kotBadgeServed
-                  ]}>
-                    {kot.status}
-                  </Text>
-                </View>
-                <View style={styles.kotDivider} />
-                {kot.lines.map((line: any, index: number) => {
-                  let name = line.item.name || 'Item';
-                  if (line.variationId) {
-                    const vObj = (line.item as any).variations?.find((v: any) => v.id === line.variationId);
-                    if (vObj) name += ` (${vObj.variantItemName})`;
-                  }
-                  const aids = line.selectedAddOnMappingIds ?? [];
-                  if (aids.length > 0) {
-                    const addons = (line.item as any).addOns ?? [];
-                    const set = new Set(aids);
-                    for (const a of addons) {
-                      if (set.has(a.id)) name += ` + ${a.addOnMenuName}`;
-                    }
-                  }
-                  const mids = line.selectedModifierMappingIds ?? [];
-                  if (mids.length > 0) {
-                    const modifiers = (line.item as any).modifiers ?? [];
-                    const mset = new Set(mids);
-                    for (const m of modifiers) {
-                      if (mset.has(m.id)) name += ` + ${m.name}`;
-                    }
-                  }
-                  
-                  return (
-                    <View key={index} style={styles.kotLine}>
-                      <Text style={styles.kotQty}>{line.qty} x</Text>
-                      <Text style={styles.kotItem} numberOfLines={2}>
-                        {name}
+            kots.map((kot) => {
+              const hasNegative = kot.lines?.some(l => l.qty < 0 || l.kotType === 2);
+              return (
+                <View
+                  key={kot.id}
+                  style={[
+                    styles.kotCard,
+                    hasNegative && styles.kotCardNegative
+                  ]}
+                >
+                  <View style={styles.kotCardHeader}>
+                    <View>
+                      <Text style={styles.kotTitle}>KOT #{kot.kotFullCode || kot.kotNo}</Text>
+                      <Text style={styles.kotSubtitle}>Invoice ID: {kot.masterId}</Text>
+                    </View>
+                    <View style={styles.kotTimeBadge}>
+                      <Text style={styles.kotTimeText}>
+                        {kot.kotTime ? new Date(kot.kotTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Now'}
                       </Text>
                     </View>
-                  );
-                })}
-                <View style={styles.kotDivider} />
-                <View style={styles.statusActionRow}>
-                  {(['Pending', 'Preparing', 'Served'] as const).map((st) => (
-                    <TouchableOpacity
-                      key={st}
-                      style={[
-                        styles.statusOptionBtn,
-                        kot.status === st && styles.statusOptionBtnActive,
-                      ]}
-                      onPress={() => updateKotStatus(kot.id, st)}
-                      activeOpacity={0.8}
-                    >
-                      <Text
+                  </View>
+
+                  <View style={styles.kotDivider} />
+
+                  <View style={styles.kotItemsList}>
+                    {kot.lines?.map((line, idx) => (
+                      <View
+                        key={line.id || idx}
                         style={[
-                          styles.statusOptionText,
-                          kot.status === st && styles.statusOptionTextActive,
+                          styles.kotItemRow,
+                          (line.qty < 0 || line.kotType === 2) && styles.kotItemRowNegative
                         ]}
                       >
-                        {st}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
+                        <Text style={[styles.kotItemQty, (line.qty < 0 || line.kotType === 2) && styles.kotItemQtyNegative]}>
+                          {(line.qty < 0 || line.kotType === 2) ? '-' : ''}{Math.abs(line.qty)}x
+                        </Text>
+                        <Text style={[styles.kotItemName, (line.qty < 0 || line.kotType === 2) && styles.kotItemNameNegative]}>
+                          {line.details}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  <View style={styles.kotCardFooter}>
+                    <View style={[styles.statusBadge, kot.prepared ? styles.statusPrepared : styles.statusPending]}>
+                      <Text style={styles.statusText}>{kot.prepared ? 'Prepared' : 'Pending'}</Text>
+                    </View>
+
+                    <View style={styles.kotActions}>
+                      {!kot.prepared && (
+                        <TouchableOpacity
+                          style={styles.actionBtn}
+                          onPress={() => handleMarkPrepared(kot.id)}
+                        >
+                          <Text style={styles.actionBtnText}>Prepare</Text>
+                        </TouchableOpacity>
+                      )}
+                      <TouchableOpacity
+                        style={[styles.actionBtn, styles.actionBtnServed]}
+                        onPress={() => handleMarkDelivered(kot.id)}
+                      >
+                        <Text style={[styles.actionBtnText, { color: '#fff' }]}>Served</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
                 </View>
-              </View>
-            ))
+              );
+            }
+            )
           )}
         </ScrollView>
       )}
@@ -359,21 +370,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 16,
     justifyContent: 'flex-start',
-  },
-  kotCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    elevation: 3,
-    minWidth: 280,
-    maxWidth: 360,
-    flexGrow: 1,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
   },
   kotHeader: {
     flexDirection: 'row',
@@ -588,5 +584,134 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: colors.textSecondary,
     fontWeight: '600',
+  },
+  kotList: {
+    padding: 20,
+    gap: 16,
+  },
+  kotCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+  },
+  kotCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  kotTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  kotCardNegative: {
+    backgroundColor: '#fff5f5',
+    borderColor: '#feb2b2',
+  },
+  kotSubtitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  kotTimeBadge: {
+    backgroundColor: colors.surfaceAlt,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  kotTimeText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.primaryDark,
+  },
+  kotItemsList: {
+    gap: 8,
+    marginBottom: 16,
+  },
+  kotItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 4,
+  },
+  kotItemRowNegative: {
+    backgroundColor: '#fef2f2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    marginHorizontal: -8,
+  },
+  kotItemQty: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.primary,
+    width: 32,
+  },
+  kotItemQtyNegative: {
+    color: '#dc2626',
+  },
+  kotItemName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+    flex: 1,
+  },
+  kotItemNameNegative: {
+    color: '#991b1b',
+  },
+  kotCardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    borderTopWidth: 1,
+    borderTopColor: colors.border + '30',
+    paddingTop: 12,
+  },
+  statusBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  statusPending: {
+    backgroundColor: '#fff7ed',
+  },
+  statusPrepared: {
+    backgroundColor: '#f0fdf4',
+  },
+  statusText: {
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    color: colors.textSecondary,
+  },
+  kotActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  actionBtn: {
+    backgroundColor: colors.surfaceAlt,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  actionBtnServed: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  actionBtnText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
   },
 });

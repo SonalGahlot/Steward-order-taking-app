@@ -54,6 +54,19 @@ export interface Outlet {
   updatedDate: string | null;
 }
 
+export interface FoodSessionDto {
+  id: number;
+  outletId: number;
+  sessionName: string | null;
+  openTime: string;
+  closeTime: string | null;
+  isOpen: boolean;
+  openedById: number;
+  closedById: number | null;
+  openingCash: number;
+  closingCash: number | null;
+}
+
 /** Payload for `POST /adminUser` (matches API columns). */
 export interface AdminUserLoginPayload {
   username: string;
@@ -123,57 +136,9 @@ export interface MenuByOutletItem {
   createdTime: string | null;
   modifyBy: number | null;
   modifyTime: string | null;
+  addOns?: any[];
+  variations?: any[];
+  modifiers?: any[];
 }
 
-export interface OrderSubmitPayload {
-  tableNo: string;
-}
-
-
-/** `GET /api/OrderDetails/ByOrder/{orderId}` — line items for receipt (admin). */
-export interface OrderDetailRowDto {
-  id?: number;
-  orderId?: number;
-  menuId?: number;
-  itemName?: string | null;
-  quantity: number;
-  basePrice?: number | null;
-  gstamount?: number | null;
-  itemTotal?: number | null;
-  totalAmount?: number | null;
-}
-
-/**
- * Order slip shown after checkout or as a preview before the API runs.
- * `orderId` is null on the preview slip; set after the order is created.
- */
-export interface GuestOrderReceipt {
-  orderId: number | null;
-  outletName: string;
-  finalAmount: number;
-  totalAmount: number;
-  gstAmount: number;
-  payload: OrderSubmitPayload;
-  lines: { itemName: string; qty: number; lineTotal: number }[];
-}
-
-/** One row in the guest cart (per outlet), with a menu snapshot for stable labels. */
-export interface CartLine {
-  outletId: number;
-  tableNo?: string | null;
-  itemId: number;
-  /** Chosen menu variation when `item.variations` is non-empty; otherwise `null`. */
-  variationId: number | null;
-  /**
-   * Selected `MenuItemAddOnMapping.mappingId` values (pre-tax add-on prices summed in totals).
-   * Empty when no add-ons; order is ignored — equality uses sorted ids.
-   */
-  selectedAddOnMappingIds: number[];
-  /**
-   * Selected `MenuItemModifierMapping.mappingId` values (pre-tax modifier prices summed in totals).
-   */
-  selectedModifierMappingIds: number[];
-  qty: number;
-  item: MenuByOutletItem;
-}
 

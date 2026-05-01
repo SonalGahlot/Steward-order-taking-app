@@ -9,6 +9,7 @@ import { loginSuccess, logout } from '../redux-store/slices/userSlice';
 import { useAppDispatch, useAppSelector } from '../redux-store/store';
 
 type LoginUser = {
+    userId: number;
     userName: string;
     accessToken: string;
 };
@@ -67,6 +68,7 @@ export const useAuth = () => {
             dispatch(
                 loginSuccess({
                     user: {
+                        userId: data.userId,
                         userName: data.userName,
                     },
                     token: data.accessToken,

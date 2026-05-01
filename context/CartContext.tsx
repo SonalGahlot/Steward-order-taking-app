@@ -1,483 +1,385 @@
-import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { CartLine, MenuByOutletItem } from '../types/types';
-const sortMappingIds = (ids: number[]): number[] => [...ids].sort((a, b) => a - b);
+import React, { createContext, useContext, useState, ReactNode, useCallback, useMemo } from 'react';
+import type { MenuByOutletItem } from '../types/types';
+import apiClient from '../apiClient';
+import { Alert } from 'react-native';
 
-const addOnSelectionEqual = (a: number[], b: number[]): boolean => {
-  if (a.length !== b.length) return false;
-  const sa = [...a].sort((x, y) => x - y);
-  const sb = [...b].sort((x, y) => x - y);
-  return sa.every((val, i) => val === sb[i]);
-};
-
-const itemHasVariations = (item: MenuByOutletItem): boolean => 
-  Array.isArray((item as any).variations) && (item as any).variations.length > 0;
-
-const CART_STORAGE_KEY = '@qr_app_cart_lines_v4';
-
-function normalizeAddonIds(raw: unknown): number[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((x): x is number => typeof x === 'number');
+export interface CartItemType {
+  id: string; // unique hash: itemId|variationId|addonIds|modifierIds
+  menuItem: MenuByOutletItem;
+  quantity: number;
+  sentQuantity: number; // How many have been sent via KOT
+  variationId: number | null;
+  addonIds: number[];
+  modifierIds: number[];
+  computedPrice: number; // total unit price including customizations
+  tranId?: number; // Backend transaction ID if it exists
 }
 
-function normalizeCartLines(data: unknown): CartLine[] {
-  if (!Array.isArray(data)) return [];
-  const out: CartLine[] = [];
-  for (const row of data) {
-    if (row == null || typeof row !== 'object') continue;
-    const r = row as Record<string, unknown>;
-    if (
-      typeof r.outletId !== 'number' ||
-      typeof r.itemId !== 'number' ||
-      typeof r.qty !== 'number' ||
-      r.item == null ||
-      typeof r.item !== 'object'
-    ) {
-      continue;
-    }
-    const vid = r.variationId;
-    if (vid != null && typeof vid !== 'number') continue;
-    out.push({
-      outletId: r.outletId,
-      itemId: r.itemId,
-      variationId: typeof vid === 'number' ? vid : null,
-      selectedAddOnMappingIds: sortMappingIds(
-        normalizeAddonIds(r.selectedAddOnMappingIds),
-      ),
-      selectedModifierMappingIds: sortMappingIds(
-        normalizeAddonIds(r.selectedModifierMappingIds),
-      ),
-      qty: r.qty,
-      item: r.item as MenuByOutletItem,
-    });
-  }
-  return out;
-}
-
-function validAddOnIdsForItem(
-  item: MenuByOutletItem,
-  ids: number[],
-): number[] {
-  const list = (item as any).addOns;
-  if (!list?.length) return [];
-  const allowed = new Set(list.map((m: any) => m.id));
-  return sortMappingIds(ids.filter((id) => allowed.has(id)));
-}
-
-function validModifierIdsForItem(
-  item: MenuByOutletItem,
-  ids: number[],
-): number[] {
-  return sortMappingIds(ids);
-}
-
-export interface KotItem {
-  id: string;
-  outletId: number;
-  tableNo: string | null;
-  tableName: string;
-  lines: CartLine[];
-  status: 'Pending' | 'Preparing' | 'Served';
-  placedTime: string;
-}
-
-type CartContextValue = {
-  lines: CartLine[];
-  kots: KotItem[];
-  linesForOutlet: (outletId: number) => CartLine[];
-  linesForTable: (outletId: number, tableNo: string | null) => CartLine[];
-  totalQtyForOutlet: (outletId: number) => number;
-  totalQtyForTable: (outletId: number, tableNo: string | null) => number;
-  addItem: (
-    outletId: number,
-    tableNo: string | null,
+interface CartContextType {
+  cartItems: CartItemType[];
+  serverItems: CartItemType[];
+  cartTotal: number;
+  cartItemCount: number;
+  invoiceId: number | null;
+  foodSessionId: number | null;
+  outletId: number | null;
+  selectedTable: string | null;
+  setInvoiceId: (id: number | null) => void;
+  setFoodSessionId: (id: number | null) => void;
+  setTableContext: (outletId: number, table: string, sessionId: number | null) => void;
+  addToCart: (
     item: MenuByOutletItem,
-    variationId: number | null,
-    selectedAddOnMappingIds: number[],
-    selectedModifierMappingIds: number[],
+    variationId?: number | null,
+    addonIds?: number[],
+    modifierIds?: number[]
   ) => void;
-  increment: (
-    outletId: number,
-    tableNo: string | null,
-    itemId: number,
-    variationId: number | null,
-    selectedAddOnMappingIds: number[],
-    selectedModifierMappingIds: number[],
-  ) => void;
-  decrement: (
-    outletId: number,
-    tableNo: string | null,
-    itemId: number,
-    variationId: number | null,
-    selectedAddOnMappingIds: number[],
-    selectedModifierMappingIds: number[],
-  ) => void;
-  removeLine: (
-    outletId: number,
-    tableNo: string | null,
-    itemId: number,
-    variationId: number | null,
-    selectedAddOnMappingIds: number[],
-    selectedModifierMappingIds: number[],
-  ) => void;
-  clearOutlet: (outletId: number) => void;
-  clearTable: (outletId: number, tableNo: string | null) => void;
-  addKot: (outletId: number, tableNo: string | null, tableName: string, lines: CartLine[]) => void;
-  updateKotStatus: (kotId: string, status: 'Pending' | 'Preparing' | 'Served') => void;
-};
-
-const CartContext = createContext<CartContextValue | null>(null);
-
-function lineMatches(
-  l: CartLine,
-  outletId: number,
-  tableNo: string | null,
-  itemId: number,
-  variationId: number | null,
-  selectedAddOnMappingIds: number[],
-  selectedModifierMappingIds: number[],
-): boolean {
-  return (
-    l.outletId === outletId &&
-    (l.tableNo ?? null) === (tableNo ?? null) &&
-    l.itemId === itemId &&
-    (l.variationId ?? null) === (variationId ?? null) &&
-    addOnSelectionEqual(l.selectedAddOnMappingIds ?? [], selectedAddOnMappingIds) &&
-    addOnSelectionEqual(
-      l.selectedModifierMappingIds ?? [],
-      selectedModifierMappingIds,
-    )
-  );
+  removeFromCart: (cartItemId: string) => void;
+  updateQuantity: (cartItemId: string, delta: number) => void;
+  clearCart: () => void;
+  setInvoiceData: (invoiceId: number, transactions: any[], addOns?: any[]) => void;
+  hydrateCart: (menus: MenuByOutletItem[]) => void;
+  markAsSent: () => void;
 }
+
+const CartContext = createContext<CartContextType | undefined>(undefined);
 
 export function CartProvider({ children }: { children: ReactNode }) {
-  const [lines, setLines] = useState<CartLine[]>([]);
-  const [kots, setKots] = useState<KotItem[]>([]);
-  const [hydrated, setHydrated] = useState(false);
+  const [cartItems, setCartItems] = useState<CartItemType[]>([]);
+  const [serverItems, setServerItems] = useState<CartItemType[]>([]);
+  const [invoiceId, setInvoiceId] = useState<number | null>(null);
+  const [foodSessionId, setFoodSessionId] = useState<number | null>(null);
+  const [outletId, setOutletId] = useState<number | null>(null);
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const rawV4 = await AsyncStorage.getItem(CART_STORAGE_KEY);
-        if (rawV4 != null) {
-          const parsed: unknown = JSON.parse(rawV4);
-          if (!cancelled) setLines(normalizeCartLines(parsed));
-          if (!cancelled) setHydrated(true);
-          return;
-        }
-        const rawV3 = await AsyncStorage.getItem('@qr_app_cart_lines_v3');
-        if (rawV3 != null) {
-          const parsed: unknown = JSON.parse(rawV3);
-          if (!cancelled) setLines(normalizeCartLines(parsed));
-          if (!cancelled) setHydrated(true);
-          return;
-        }
-        const rawV2 = await AsyncStorage.getItem('@qr_app_cart_lines_v2');
-        if (rawV2 != null) {
-          const parsed: unknown = JSON.parse(rawV2);
-          const migrated = normalizeCartLines(parsed);
-          if (!cancelled) setLines(migrated);
-        } else {
-          const rawV1 = await AsyncStorage.getItem('@qr_app_cart_lines_v1');
-          if (rawV1 != null) {
-            const parsed: unknown = JSON.parse(rawV1);
-            const migrated = normalizeCartLines(parsed);
-            if (!cancelled) setLines(migrated);
-          }
-        }
-      } catch {
-        /* ignore corrupt storage */
-      } finally {
-        if (!cancelled) setHydrated(true);
+  const cartItemCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+  const cartTotal = cartItems.reduce((sum, item) => sum + item.computedPrice * item.quantity, 0);
+
+  const calculateComputedPrice = (
+    item: MenuByOutletItem,
+    variationId: number | null,
+    addonIds: number[],
+    modifierIds: number[]
+  ) => {
+    let price = item.unitPrice;
+
+    // Check variation
+    const vars: any[] = (item as any).variations || [];
+    if (variationId) {
+      const v = vars.find((x: any) => x.id === variationId);
+      if (v) price = v.unitPrice;
+    }
+
+    // Check addons
+    const addons: any[] = (item as any).addOns || [];
+    addonIds.forEach(id => {
+      const a = addons.find((x: any) => x.addOnMenuId === id);
+      if (a && !a.isFree) price += a.addOnPrice;
+    });
+
+    // Check modifiers
+    const modifiers: any[] = (item as any).modifiers || [];
+    modifierIds.forEach(id => {
+      const m = modifiers.find((x: any) => x.id === id);
+      if (m && m.isChargeable) price += m.priceAdjustment;
+    });
+
+    return price;
+  };
+
+  const generateCartItemId = (
+    itemId: number,
+    variationId: number | null,
+    addonIds: number[],
+    modifierIds: number[]
+  ) => {
+    return `${itemId}|${variationId || ''}|${[...addonIds].sort().join(',')}|${[...modifierIds].sort().join(',')}`;
+  };
+
+  const addToCart = useCallback(async (
+    item: MenuByOutletItem,
+    variationId: number | null = null,
+    addonIds: number[] = [],
+    modifierIds: number[] = []
+  ) => {
+    const id = generateCartItemId(item.id, variationId, addonIds, modifierIds);
+    let currentTranId: number | undefined;
+
+    setCartItems(prev => {
+      const existing = prev.find(x => x.id === id);
+      if (existing) {
+        currentTranId = existing.tranId;
+        return prev.map(x => (x.id === id ? { ...x, quantity: x.quantity + 1 } : x));
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    void AsyncStorage.setItem(CART_STORAGE_KEY, JSON.stringify(lines)).catch(
-      () => {},
-    );
-  }, [lines, hydrated]);
+      const sItem = serverItems.find(x => x.id === id);
+      currentTranId = sItem?.tranId;
+      const computedPrice = calculateComputedPrice(item, variationId, addonIds, modifierIds);
 
-  const linesForOutlet = useCallback(
-    (outletId: number) => lines.filter((l) => l.outletId === outletId),
-    [lines],
-  );
+      return [
+        ...prev,
+        {
+          id,
+          menuItem: item,
+          quantity: 1,
+          sentQuantity: sItem ? sItem.sentQuantity : 0,
+          variationId,
+          addonIds,
+          modifierIds,
+          computedPrice,
+          tranId: sItem ? sItem.tranId : undefined,
+        },
+      ];
+    });
 
-  const linesForTable = useCallback(
-    (outletId: number, tableNo: string | null) =>
-      lines.filter(
-        (l) =>
-          l.outletId === outletId &&
-          (l.tableNo ?? null) === (tableNo ?? null),
-      ),
-    [lines],
-  );
+    // Server Sync
+    try {
+      let currentInvoiceId = invoiceId;
 
-  const totalQtyForOutlet = useCallback(
-    (outletId: number) =>
-      lines
-        .filter((l) => l.outletId === outletId)
-        .reduce((sum, l) => sum + l.qty, 0),
-    [lines],
-  );
-
-  const totalQtyForTable = useCallback(
-    (outletId: number, tableNo: string | null) =>
-      lines
-        .filter(
-          (l) =>
-            l.outletId === outletId &&
-            (l.tableNo ?? null) === (tableNo ?? null),
-        )
-        .reduce((sum, l) => sum + l.qty, 0),
-    [lines],
-  );
-
-  const addItem = useCallback(
-    (
-      outletId: number,
-      tableNo: string | null,
-      item: MenuByOutletItem,
-      variationId: number | null,
-      selectedAddOnMappingIds: number[],
-      selectedModifierMappingIds: number[],
-    ) => {
-      const vid = itemHasVariations(item) ? variationId : null;
-      const addonIds = validAddOnIdsForItem(item, selectedAddOnMappingIds);
-      const modIds = validModifierIdsForItem(item, selectedModifierMappingIds);
-      setLines((prev) => {
-        const idx = prev.findIndex((l) =>
-          lineMatches(l, outletId, tableNo, item.id, vid, addonIds, modIds),
-        );
-        if (idx >= 0) {
-          const next = [...prev];
-          next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
-          return next;
+      // 1. Create Invoice Master if it doesn't exist
+      if (!currentInvoiceId && outletId && selectedTable && foodSessionId) {
+        console.log('[Cart] Creating new invoice master...');
+        const masterRes = await apiClient.post('/api/FNBInvoiceMaster', {
+          outletId: outletId,
+          tableId: parseInt(selectedTable, 10),
+          tableNo: 1,
+          foodSessionId: foodSessionId,
+          orderType: 'DineIn',
+          pax: 1,
+          stewardId: 1,
+        });
+        if (masterRes.data && masterRes.data.id) {
+          currentInvoiceId = masterRes.data.id;
+          setInvoiceId(currentInvoiceId);
         }
-        return [
-          ...prev,
-          {
-            outletId,
-            tableNo,
-            itemId: item.id,
-            variationId: vid,
-            selectedAddOnMappingIds: addonIds,
-            selectedModifierMappingIds: modIds,
-            qty: 1,
-            item: { ...item },
-          },
-        ];
-      });
-    },
-    [],
-  );
+      }
 
-  const increment = useCallback(
-    (
-      outletId: number,
-      tableNo: string | null,
-      itemId: number,
-      variationId: number | null,
-      selectedAddOnMappingIds: number[],
-      selectedModifierMappingIds: number[],
-    ) => {
-      setLines((prev) =>
-        prev.map((l) =>
-          lineMatches(
-            l,
-            outletId,
-            tableNo,
-            itemId,
+      if (currentInvoiceId) {
+        if (currentTranId) {
+          const existing = cartItems.find(x => x.id === id);
+          const newQty = (existing ? existing.quantity : 0) + 1;
+          await apiClient.put(`/api/FNBInvoiceTran/${currentTranId}/qty`, { qty: newQty });
+        } else {
+          const res = await apiClient.post('/api/FNBInvoiceTran', {
+            masterId: currentInvoiceId,
+            menuId: item.id,
             variationId,
-            selectedAddOnMappingIds,
-            selectedModifierMappingIds,
-          )
-            ? { ...l, qty: l.qty + 1 }
-            : l,
-        ),
-      );
-    },
-    [],
-  );
+            qty: 1,
+            unitPrice: calculateComputedPrice(item, variationId, addonIds, modifierIds),
+            addOnsIdList: addonIds.join(','),
+          });
+          const newId = res.data.id;
+          await apiClient.put(`/api/FNBInvoiceTran/${newId}/qty`, { qty: 1 });
+          setCartItems(prev => prev.map(x => x.id === id ? { ...x, tranId: newId } : x));
 
-  const decrement = useCallback(
-    (
-      outletId: number,
-      tableNo: string | null,
-      itemId: number,
-      variationId: number | null,
-      selectedAddOnMappingIds: number[],
-      selectedModifierMappingIds: number[],
-    ) => {
-      setLines((prev) => {
-        const next: CartLine[] = [];
-        for (const l of prev) {
-          if (
-            !lineMatches(
-              l,
-              outletId,
-              tableNo,
-              itemId,
-              variationId,
-              selectedAddOnMappingIds,
-              selectedModifierMappingIds,
-            )
-          ) {
-            next.push(l);
-            continue;
+          if (addonIds.length > 0) {
+            const addons: any[] = (item as any).addOns || [];
+            for (const aid of addonIds) {
+              const selectedAddon = addons.find((a: any) => a.addOnMenuId === aid);
+              await apiClient.post('/api/FNBInvoiceTranAddOn', {
+                masterId: currentInvoiceId,
+                menuId: item.id,
+                addOnId: aid,
+                price: selectedAddon ? selectedAddon.addOnPrice : 0
+              });
+            }
           }
-          if (l.qty <= 1) continue;
-          next.push({ ...l, qty: l.qty - 1 });
         }
-        return next;
+      }
+    } catch (e) {
+      console.error('Failed to sync addToCart to server', e);
+    }
+  }, [invoiceId, cartItems, serverItems]);
+
+  const updateQuantity = useCallback(async (cartItemId: string, delta: number) => {
+    let targetItem: CartItemType | undefined;
+    setCartItems(prev => {
+      const updated = prev.map(item => {
+        if (item.id === cartItemId) {
+          const newQty = item.quantity + delta;
+          targetItem = { ...item, quantity: newQty };
+          return targetItem;
+        }
+        return item;
+      }).filter(item => item.quantity > 0);
+      return updated;
+    });
+
+    // Server Sync
+    try {
+      if (invoiceId && targetItem && targetItem.tranId) {
+        if (delta > 0) {
+          // Increase: Use /qty endpoint
+          await apiClient.put(`/api/FNBInvoiceTran/${targetItem.tranId}/qty`, { qty: targetItem.quantity });
+        } else if (delta < 0) {
+          // Decrease: Use /void endpoint for the delta
+          await apiClient.post(`/api/FNBInvoiceTran/${targetItem.tranId}/void`, {
+            voidQty: Math.abs(delta),
+            reason: 'Quantity reduced in cart',
+            voidBy: 'User'
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Failed to sync updateQuantity to server', e);
+    }
+  }, [invoiceId]);
+
+  const removeFromCart = useCallback(async (cartItemId: string) => {
+    let targetItem: CartItemType | undefined;
+    setCartItems(prev => {
+      targetItem = prev.find(item => item.id === cartItemId);
+      return prev.filter(item => item.id !== cartItemId);
+    });
+
+    // Server Sync
+    try {
+      if (invoiceId && targetItem && targetItem.tranId) {
+        await apiClient.post(`/api/FNBInvoiceTran/${targetItem.tranId}/void`, {
+          voidQty: targetItem.quantity,
+          reason: 'Removed from cart',
+          voidBy: 'User'
+        });
+      }
+    } catch (e) {
+      console.error('Failed to sync removeFromCart to server', e);
+    }
+  }, [invoiceId]);
+
+  const clearCart = useCallback(() => {
+    setCartItems([]);
+    setServerItems([]);
+    setInvoiceId(null);
+  }, []);
+
+
+  const setInvoiceData = useCallback((id: number, transactions: any[], addOns: any[] = []) => {
+    setInvoiceId(id);
+    const newItems: CartItemType[] = transactions
+      .filter(t => (t.qty - (t.negQty || 0)) > 0) // Filter out fully voided items
+      .map(t => {
+        const itemAddons = addOns.filter(a => a.menuId === t.menuId);
+        const addonIds = itemAddons.map(a => a.addOnId);
+        const effectiveQty = t.qty - (t.negQty || 0);
+
+        return {
+          id: generateCartItemId(t.menuId, t.variationId, addonIds, t.modifierId ? [t.modifierId] : []),
+          menuItem: t.menuItem || {
+            id: t.menuId,
+            name: t.menuName || 'Unknown Item',
+            unitPrice: t.unitPrice,
+            variations: [],
+            addOns: [],
+            modifiers: []
+          },
+          quantity: effectiveQty,
+          sentQuantity: effectiveQty,
+          variationId: t.variationId,
+          addonIds: addonIds,
+          modifierIds: t.modifierId ? [t.modifierId] : [],
+          computedPrice: t.unitPrice,
+          tranId: t.id
+        };
       });
-    },
-    [],
-  );
-
-  const removeLine = useCallback(
-    (
-      outletId: number,
-      tableNo: string | null,
-      itemId: number,
-      variationId: number | null,
-      selectedAddOnMappingIds: number[],
-      selectedModifierMappingIds: number[],
-    ) => {
-      setLines((prev) =>
-        prev.filter(
-          (l) =>
-            !lineMatches(
-              l,
-              outletId,
-              tableNo,
-              itemId,
-              variationId,
-              selectedAddOnMappingIds,
-              selectedModifierMappingIds,
-            ),
-        ),
-      );
-    },
-    [],
-  );
-
-  const clearOutlet = useCallback((outletId: number) => {
-    setLines((prev) => prev.filter((l) => l.outletId !== outletId));
+    setCartItems(newItems);
+    setServerItems([...newItems]);
   }, []);
 
-  const clearTable = useCallback((outletId: number, tableNo: string | null) => {
-    setLines((prev) =>
-      prev.filter(
-        (l) =>
-          !(
-            l.outletId === outletId &&
-            (l.tableNo ?? null) === (tableNo ?? null)
-          ),
-      ),
-    );
-  }, []);
-
-  const addKot = useCallback((outletId: number, tableNo: string | null, tableName: string, newLines: CartLine[]) => {
-    setKots((prev) => [
-      ...prev,
-      {
-        id: Math.floor(Math.random() * 10000).toString(),
-        outletId,
-        tableNo,
-        tableName,
-        lines: [...newLines],
-        status: 'Pending',
-        placedTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      },
-    ]);
-  }, []);
-
-  const updateKotStatus = useCallback((kotId: string, status: 'Pending' | 'Preparing' | 'Served') => {
-    setKots((prev) =>
-      prev.map((k) => (k.id === kotId ? { ...k, status } : k))
-    );
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const rawKots = await AsyncStorage.getItem('@qr_app_kots');
-        if (rawKots != null) {
-          const parsed = JSON.parse(rawKots);
-          if (!cancelled && Array.isArray(parsed)) {
-            setKots(parsed);
-          }
+  const hydrateCart = useCallback((menus: MenuByOutletItem[]) => {
+    setCartItems(prev => {
+      let changed = false;
+      const updated = prev.map(item => {
+        // Only hydrate if the item is currently a skeleton (no variations/addons etc)
+        // or we just want to ensure it has the latest data.
+        // To prevent infinite loop, we check if we actually found a better item.
+        const fullItem = menus.find(m => m.id === item.menuItem.id);
+        if (fullItem && (!item.menuItem.variations || item.menuItem.variations.length === 0)) {
+          changed = true;
+          return { ...item, menuItem: fullItem };
         }
-      } catch {}
-    })();
-    return () => {
-      cancelled = true;
-    };
+        return item;
+      });
+      return changed ? updated : prev;
+    });
+
+    setServerItems(prev => {
+      let changed = false;
+      const updated = prev.map(item => {
+        const fullItem = menus.find(m => m.id === item.menuItem.id);
+        if (fullItem && (!item.menuItem.variations || item.menuItem.variations.length === 0)) {
+          changed = true;
+          return { ...item, menuItem: fullItem };
+        }
+        return item;
+      });
+      return changed ? updated : prev;
+    });
   }, []);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    void AsyncStorage.setItem('@qr_app_kots', JSON.stringify(kots)).catch(() => {});
-  }, [kots, hydrated]);
+  const markAsSent = useCallback(() => {
+    setCartItems(prev => {
+      const updated = prev.map(item => ({ ...item, sentQuantity: item.quantity }));
+      setServerItems([...updated]);
+      return updated;
+    });
+  }, []);
 
-  const value = useMemo<CartContextValue>(
-    () => ({
-      lines,
-      kots,
-      linesForOutlet,
-      linesForTable,
-      totalQtyForOutlet,
-      totalQtyForTable,
-      addItem,
-      increment,
-      decrement,
-      removeLine,
-      clearOutlet,
-      clearTable,
-      addKot,
-      updateKotStatus,
-    }),
-    [
-      lines,
-      kots,
-      linesForOutlet,
-      linesForTable,
-      totalQtyForOutlet,
-      totalQtyForTable,
-      addItem,
-      increment,
-      decrement,
-      removeLine,
-      clearOutlet,
-      clearTable,
-      addKot,
-      updateKotStatus,
-    ],
+  const setTableContext = useCallback((oid: number, table: string, sid: number | null) => {
+    setOutletId(oid);
+    setSelectedTable(table);
+    setFoodSessionId(sid);
+  }, []);
+
+  const contextValue = useMemo(() => ({
+    cartItems,
+    serverItems,
+    cartTotal,
+    cartItemCount,
+    invoiceId,
+    foodSessionId,
+    outletId,
+    selectedTable,
+    setInvoiceId,
+    setFoodSessionId,
+    setTableContext,
+    addToCart,
+    removeFromCart,
+    updateQuantity,
+    clearCart,
+    setInvoiceData,
+    hydrateCart,
+    markAsSent,
+  }), [
+    cartItems,
+    serverItems,
+    cartTotal,
+    cartItemCount,
+    invoiceId,
+    foodSessionId,
+    outletId,
+    selectedTable,
+    setInvoiceId,
+    setFoodSessionId,
+    setTableContext,
+    addToCart,
+    removeFromCart,
+    updateQuantity,
+    clearCart,
+    setInvoiceData,
+    hydrateCart,
+    markAsSent,
+  ]);
+
+  return (
+    <CartContext.Provider value={contextValue}>
+      {children}
+    </CartContext.Provider>
   );
-
-  return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }
 
-export function useCart(): CartContextValue {
-  const ctx = useContext(CartContext);
-  if (!ctx) {
-    throw new Error('useCart must be used within CartProvider');
+export function useCart() {
+  const context = useContext(CartContext);
+  if (context === undefined) {
+    throw new Error('useCart must be used within a CartProvider');
   }
-  return ctx;
+  return context;
 }

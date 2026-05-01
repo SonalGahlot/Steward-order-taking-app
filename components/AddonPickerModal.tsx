@@ -124,15 +124,15 @@ export default function AddonPickerModal({
                 <Text style={styles.sectionHeading}>Add-ons</Text>
                 <View style={styles.chipContainer}>
                   {addons.map((addon) => {
-                    const isSelected = selectedAddonIds.includes(addon.id);
+                    const isSelected = selectedAddonIds.includes(addon.addOnMenuId);
                     return (
                       <TouchableOpacity
-                        key={addon.id}
+                        key={addon.addOnMenuId}
                         style={[
                           styles.chip,
                           isSelected && styles.chipSelected,
                         ]}
-                        onPress={() => toggleAddon(addon.id)}
+                        onPress={() => toggleAddon(addon.addOnMenuId)}
                         activeOpacity={0.8}
                       >
                         <Text

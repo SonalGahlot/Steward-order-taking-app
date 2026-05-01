@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useOutlet } from '../hooks/useOutlet';
+import { useFoodSession } from '../hooks/useFoodSession';
 import type { AdminUserLoginResponse, Outlet } from '../types/types';
 import { theme } from '../theme';
 
@@ -41,7 +42,7 @@ const OUTLET_IMAGES: Record<number, ImageSourcePropType> = {
 const FALLBACK_IMAGE: ImageSourcePropType = require('../assets/restaurant.png');
 
 export interface LandingScreenProps {
-  onSelectOutlet?: (outlet: Outlet) => void;
+  onSelectOutlet?: (outlet: Outlet, foodSessionId: number) => void;
   /** Called after a successful admin login. */
   onLoginSuccess?: (result: AdminUserLoginResponse) => void;
 }
@@ -54,6 +55,11 @@ export default function LandingScreen({
   const { width: windowWidth } = useWindowDimensions();
   const { outlets, loading, error, getOutlets } = useOutlet();
   const [viewMode, setViewMode] = useState<OutletViewMode>('compact');
+  const [selectedOutletForSession, setSelectedOutletForSession] = useState<Outlet | null>(null);
+
+  const { sessions, loading: sessionsLoading, error: sessionsError } = useFoodSession(
+    selectedOutletForSession?.id
+  );
 
   const [loginOpen, setLoginOpen] = useState(false);
   const [userName, setUserName] = useState('');
@@ -104,7 +110,11 @@ export default function LandingScreen({
   const handleCardPress = useCallback(
     (item: Outlet) => {
       if (!item.isActive) return;
-      onSelectOutlet?.(item);
+      if (item.foodSessionRequired) {
+        setSelectedOutletForSession(item);
+      } else {
+        onSelectOutlet?.(item, 0);
+      }
     },
     [onSelectOutlet],
   );
@@ -235,6 +245,36 @@ export default function LandingScreen({
     [viewMode, gridItemWidth, handleCardPress],
   );
 
+  const renderSessionItem: ListRenderItem<any> = useCallback(
+    ({ item }) => {
+      return (
+        <TouchableOpacity
+          activeOpacity={0.9}
+          style={styles.compactRow}
+          onPress={() => onSelectOutlet?.(selectedOutletForSession!, item.id)}
+        >
+          <View style={styles.compactTextCol}>
+            <View style={styles.compactTopRow}>
+              <Text style={styles.compactTitle} numberOfLines={1}>
+                {item.sessionName || `Session #${item.id}`}
+              </Text>
+              <View style={[styles.statusBadge, styles.statusBadgeOpen]}>
+                <Text style={[styles.statusBadgeText, styles.statusBadgeTextOpen]}>
+                  ACTIVE
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.compactDesc} numberOfLines={1}>
+              Opened: {new Date(item.openTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </View>
+          <Text style={styles.compactArrow}>→</Text>
+        </TouchableOpacity>
+      );
+    },
+    [selectedOutletForSession, onSelectOutlet],
+  );
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
@@ -356,54 +396,98 @@ export default function LandingScreen({
       <View style={styles.sectionHead}>
         <View style={styles.sectionHeadTop}>
           <View style={styles.sectionHeadText}>
-            <Text style={styles.sectionTitle}>Explore our outlets</Text>
+            <Text style={styles.sectionTitle}>
+              {selectedOutletForSession ? 'Select Food Session' : 'Explore our outlets'}
+            </Text>
             <Text style={styles.sectionHint}>
-              Select an experience to view the menu
+              {selectedOutletForSession
+                ? `Choose an active session for ${selectedOutletForSession.name}`
+                : 'Select an experience to view the menu'}
             </Text>
           </View>
-          <View style={styles.viewToggle} accessibilityRole='tablist'>
-            {VIEW_OPTIONS.map(({ key, label }) => {
-              const selected = viewMode === key;
-              return (
-                <TouchableOpacity
-                  key={key}
-                  style={[styles.viewSegment, selected && styles.viewSegmentOn]}
-                  onPress={() => setViewMode(key)}
-                  activeOpacity={0.85}
-                  accessibilityRole='button'
-                  accessibilityState={{ selected }}
-                  accessibilityLabel={`${label} view`}
-                >
-                  <Text
-                    style={[
-                      styles.viewSegmentText,
-                      selected && styles.viewSegmentTextOn,
-                    ]}
+          {selectedOutletForSession ? (
+            <TouchableOpacity
+              style={styles.backBtn}
+              onPress={() => setSelectedOutletForSession(null)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.backBtnText}>← Back</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.viewToggle} accessibilityRole='tablist'>
+              {VIEW_OPTIONS.map(({ key, label }) => {
+                const selected = viewMode === key;
+                return (
+                  <TouchableOpacity
+                    key={key}
+                    style={[styles.viewSegment, selected && styles.viewSegmentOn]}
+                    onPress={() => setViewMode(key)}
+                    activeOpacity={0.85}
+                    accessibilityRole='button'
+                    accessibilityState={{ selected }}
+                    accessibilityLabel={`${label} view`}
                   >
-                    {label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+                    <Text
+                      style={[
+                        styles.viewSegmentText,
+                        selected && styles.viewSegmentTextOn,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
         </View>
       </View>
 
-      {loading ? (
+      {loading || sessionsLoading ? (
         <View style={styles.centered}>
           <ActivityIndicator size='large' color={colors.primaryDark} />
         </View>
-      ) : error ? (
+      ) : error || sessionsError ? (
         <View style={styles.centered}>
-          <Text style={styles.errorText}>{error}</Text>
+          <Text style={styles.errorText}>{error || sessionsError}</Text>
           <TouchableOpacity
             style={styles.retryBtn}
-            onPress={() => { void getOutlets(); }}
+            onPress={() => {
+              if (selectedOutletForSession) {
+                // We can't easily refetch sessions here without refetch from hook,
+                // but setting state again might trigger it or just let user go back.
+                setSelectedOutletForSession(null);
+              } else {
+                void getOutlets();
+              }
+            }}
             activeOpacity={0.85}
           >
             <Text style={styles.retryBtnText}>Retry</Text>
           </TouchableOpacity>
         </View>
+      ) : selectedOutletForSession ? (
+        <FlatList
+          data={sessions}
+          keyExtractor={(s) => String(s.id)}
+          renderItem={renderSessionItem}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={
+            <View style={styles.centered}>
+              <Text style={styles.emptyText}>
+                No active food sessions for this outlet.
+              </Text>
+              <TouchableOpacity
+                style={[styles.retryBtn, { marginTop: 12 }]}
+                onPress={() => setSelectedOutletForSession(null)}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.retryBtnText}>Go Back</Text>
+              </TouchableOpacity>
+            </View>
+          }
+        />
       ) : (
         <FlatList
           key={viewMode}
@@ -430,6 +514,19 @@ export default function LandingScreen({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
+  backBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  backBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
 
   header: {
     flexDirection: 'row',
